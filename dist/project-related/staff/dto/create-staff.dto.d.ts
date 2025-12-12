@@ -1,0 +1,33 @@
+import { BaseSaveDto } from '../../../common/base-crud/base-save.dto';
+import { StaffRole, StaffStatus, Gender, CoachLevel } from '../entities/staff.entity';
+export declare class CreateStaffDto extends BaseSaveDto {
+    firstName: string;
+    lastName: string;
+    gender?: Gender;
+    fiscalCode?: string;
+    email?: string;
+    phone?: string;
+    address?: string;
+    city?: string;
+    postalCode?: string;
+    birthDate?: string;
+    birthPlace?: string;
+    staffRole?: StaffRole;
+    status?: StaffStatus;
+    hireDate?: string;
+    endDate?: string;
+    emergencyContact?: string;
+    emergencyPhone?: string;
+    notes?: string;
+    drivingLicense?: string;
+    drivingLicenseExpiry?: string;
+    skiInstructorLicense?: string;
+    skiInstructorLicenseExpiry?: string;
+    firstAidCertificate?: string;
+    firstAidCertificateExpiry?: string;
+    isCoach?: boolean;
+    coachLevel?: CoachLevel;
+    coachLicenseExpiry?: string;
+    medicalExamExpiry?: string;
+    profileImageUrl?: string;
+}
