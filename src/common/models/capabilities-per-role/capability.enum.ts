@@ -1,0 +1,40 @@
+export enum Capability {
+  // Gestione utenti e ruoli
+  CAN_MANAGE_USERS = 'CAN_MANAGE_USERS',
+  CAN_VIEW_USERS = 'CAN_VIEW_USERS',
+  CAN_MANAGE_ROLES = 'CAN_MANAGE_ROLES',
+  CAN_MANAGE_CAPABILITIES = 'CAN_MANAGE_CAPABILITIES',
+  
+  // Gestione tesserati
+  CAN_MANAGE_MEMBERS = 'CAN_MANAGE_MEMBERS',
+  CAN_VIEW_MEMBERS = 'CAN_VIEW_MEMBERS',
+  
+  // Gestione staff
+  CAN_MANAGE_STAFF = 'CAN_MANAGE_STAFF',
+  CAN_VIEW_STAFF = 'CAN_VIEW_STAFF',
+  
+  // Gestione transazioni finanziarie
+  CAN_MANAGE_TRANSACTIONS = 'CAN_MANAGE_TRANSACTIONS',
+  CAN_VIEW_TRANSACTIONS = 'CAN_VIEW_TRANSACTIONS',
+  CAN_VIEW_STATISTICS = 'CAN_VIEW_STATISTICS',
+  
+  // Gestione veicoli
+  CAN_MANAGE_VEHICLES = 'CAN_MANAGE_VEHICLES',
+  CAN_VIEW_VEHICLES = 'CAN_VIEW_VEHICLES',
+  
+  // Gestione categorie
+  CAN_MANAGE_CATEGORIES = 'CAN_MANAGE_CATEGORIES',
+  CAN_VIEW_CATEGORIES = 'CAN_VIEW_CATEGORIES',
+  
+  // Impostazioni
+  CAN_MANAGE_SETTINGS = 'CAN_MANAGE_SETTINGS',
+  CAN_VIEW_SETTINGS = 'CAN_VIEW_SETTINGS',
+  
+  // Dashboard
+  CAN_VIEW_DASHBOARD = 'CAN_VIEW_DASHBOARD',
+}
+
+// Lista di tutte le capabilities
+export const ALL_CAPABILITIES = Object.values(Capability).filter(
+  (value) => typeof value === 'string',
+);
