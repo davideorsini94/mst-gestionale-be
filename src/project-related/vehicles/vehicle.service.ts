@@ -1,17 +1,33 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { BaseService } from '../../common/base-crud/base.service';
 import { Vehicle } from './entities/vehicle.entity';
 import { BaseSaveDto } from '../../common/base-crud/base-save.dto';
 import { FindOptionsOrder } from 'typeorm';
+import { ReminderService } from '../reminders/reminder.service';
 
 @Injectable()
 export class VehicleService extends BaseService<Vehicle, BaseSaveDto, BaseSaveDto> {
-  constructor() {
+  constructor(
+    @Inject(forwardRef(() => ReminderService))
+    private readonly reminderService: ReminderService,
+  ) {
     super(Vehicle);
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Vehicle> {
     return { name: 'ASC' };
+  }
+
+  async create(dto: BaseSaveDto): Promise<Vehicle> {
+    const vehicle = await super.create(dto);
+    await this.reminderService.updateVehicleReminders(vehicle);
+    return vehicle;
+  }
+
+  async update(uuid: string, dto: BaseSaveDto): Promise<Vehicle> {
+    const vehicle = await super.update(uuid, dto);
+    await this.reminderService.updateVehicleReminders(vehicle);
+    return vehicle;
   }
 
   async getExpiringDocuments(daysAhead: number = 30): Promise<{

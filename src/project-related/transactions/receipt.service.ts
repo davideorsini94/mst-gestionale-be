@@ -9,9 +9,29 @@ import { Repository } from 'typeorm';
 @Injectable()
 export class ReceiptService {
   private readonly transactionRepo: Repository<Transaction>;
+  private receiptLock: Map<number, Promise<void>> = new Map(); // Lock per anno
 
   constructor(private readonly minioService: MinioService) {
     this.transactionRepo = dataSource.getRepository(Transaction);
+  }
+
+  // Metodo per acquisire il lock per un anno specifico
+  private async acquireLock(year: number): Promise<() => void> {
+    // Aspetta che eventuali operazioni precedenti per questo anno siano completate
+    while (this.receiptLock.has(year)) {
+      await this.receiptLock.get(year);
+    }
+    
+    let releaseLock: () => void;
+    const lockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    this.receiptLock.set(year, lockPromise);
+    
+    return () => {
+      this.receiptLock.delete(year);
+      releaseLock!();
+    };
   }
 
   private getAssetsPath(): string {
@@ -112,20 +132,27 @@ export class ReceiptService {
     const transactionDate = new Date(transaction.date);
     const year = transactionDate.getFullYear();
 
-    const receiptNumber = await this.getNextReceiptNumber(year);
+    // Acquisisce il lock per l'anno per evitare race condition
+    const releaseLock = await this.acquireLock(year);
+    
+    try {
+      const receiptNumber = await this.getNextReceiptNumber(year);
 
-    transaction.receiptNumber = receiptNumber;
-    transaction.receiptYear = year;
+      transaction.receiptNumber = receiptNumber;
+      transaction.receiptYear = year;
 
-    const pdfBuffer = await this.generateReceiptPdf(transaction);
+      const pdfBuffer = await this.generateReceiptPdf(transaction);
 
-    const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
-    const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
-    const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
+      const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+      const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
+      const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
 
-    const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
+      const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
 
-    return { minioPath, receiptNumber, receiptYear: year };
+      return { minioPath, receiptNumber, receiptYear: year };
+    } finally {
+      releaseLock();
+    }
   }
 
   async updateReceipt(transaction: Transaction): Promise<{ minioPath: string; receiptNumber: number; receiptYear: number }> {
@@ -143,9 +170,15 @@ export class ReceiptService {
     let receiptNumber = transaction.receiptNumber;
     let receiptYear = transaction.receiptYear;
 
+    // Se l'anno è cambiato, dobbiamo generare un nuovo numero con lock
     if (receiptYear !== year) {
-      receiptNumber = await this.getNextReceiptNumber(year);
-      receiptYear = year;
+      const releaseLock = await this.acquireLock(year);
+      try {
+        receiptNumber = await this.getNextReceiptNumber(year);
+        receiptYear = year;
+      } finally {
+        releaseLock();
+      }
     }
 
     transaction.receiptNumber = receiptNumber;
@@ -175,5 +208,68 @@ export class ReceiptService {
 
   async getReceiptStream(minioPath: string): Promise<any> {
     return this.minioService.getFile(minioPath);
+  }
+
+  /**
+   * Rigenera tutte le ricevute per un anno specifico con numeri sequenziali corretti
+   * Le transazioni vengono ordinate per data e ricevono numeri progressivi
+   */
+  async regenerateReceiptsForYear(year: number): Promise<{ regenerated: number; errors: string[] }> {
+    const releaseLock = await this.acquireLock(year);
+    
+    try {
+      // Trova tutte le transazioni INCOME per l'anno, ordinate per data
+      const transactions = await this.transactionRepo
+        .createQueryBuilder('t')
+        .where('t.type = :type', { type: TransactionType.INCOME })
+        .andWhere('EXTRACT(YEAR FROM t.date) = :year', { year })
+        .orderBy('t.date', 'ASC')
+        .addOrderBy('t.createdAt', 'ASC')
+        .getMany();
+
+      const result = { regenerated: 0, errors: [] as string[] };
+      let receiptNumber = 1;
+
+      for (const transaction of transactions) {
+        try {
+          // Elimina la vecchia ricevuta se esiste
+          if (transaction.receiptMinioPath) {
+            try {
+              await this.minioService.deleteFile(transaction.receiptMinioPath);
+            } catch (e) {
+              // Ignora errori di eliminazione
+            }
+          }
+
+          // Assegna il nuovo numero
+          transaction.receiptNumber = receiptNumber;
+          transaction.receiptYear = year;
+
+          // Genera il nuovo PDF
+          const pdfBuffer = await this.generateReceiptPdf(transaction);
+
+          const transactionDate = new Date(transaction.date);
+          const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+          const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
+          const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
+
+          const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
+
+          // Aggiorna la transazione
+          transaction.receiptMinioPath = minioPath;
+          await this.transactionRepo.save(transaction);
+
+          receiptNumber++;
+          result.regenerated++;
+        } catch (error) {
+          result.errors.push(`Transazione ${transaction.uuid}: ${error.message}`);
+        }
+      }
+
+      console.log(`[ReceiptService] Rigenerate ${result.regenerated} ricevute per l'anno ${year}`);
+      return result;
+    } finally {
+      releaseLock();
+    }
   }
 }

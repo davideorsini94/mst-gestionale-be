@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Inject, forwardRef } from '@nestjs/common';
 import { BaseService } from '../../common/base-crud/base.service';
 import { Staff, StaffDocument, StaffDocumentType } from './entities/staff.entity';
 import { CreateStaffDto } from './dto/create-staff.dto';
@@ -6,17 +6,34 @@ import { UpdateStaffDto } from './dto/update-staff.dto';
 import { FindOptionsOrder } from 'typeorm';
 import { dataSource } from '../../datasources/data-source';
 import { FileService } from '../../common/files/file.service';
+import { ReminderService } from '../reminders/reminder.service';
 
 @Injectable()
 export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaffDto> {
   private documentRepository = dataSource.getRepository(StaffDocument);
 
-  constructor(private readonly fileService: FileService) {
+  constructor(
+    private readonly fileService: FileService,
+    @Inject(forwardRef(() => ReminderService))
+    private readonly reminderService: ReminderService,
+  ) {
     super(Staff);
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Staff> {
     return { lastName: 'ASC', firstName: 'ASC' };
+  }
+
+  async create(dto: CreateStaffDto): Promise<Staff> {
+    const staff = await super.create(dto);
+    await this.reminderService.updateStaffReminders(staff);
+    return staff;
+  }
+
+  async update(uuid: string, dto: UpdateStaffDto): Promise<Staff> {
+    const staff = await super.update(uuid, dto);
+    await this.reminderService.updateStaffReminders(staff);
+    return staff;
   }
 
   async findByEmail(email: string): Promise<Staff | null> {

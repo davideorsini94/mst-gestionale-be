@@ -8,16 +8,20 @@ import {
   Param,
   Query,
   Res,
+  Req,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
-import { FastifyReply } from 'fastify';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { FastifyReply, FastifyRequest } from 'fastify';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiConsumes } from '@nestjs/swagger';
 import { TransactionService } from './transaction.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
 import { ReceiptMigrationService } from './receipt-migration.service';
+import { ExcelImportService } from './excel-import.service';
+import { ReceiptService } from './receipt.service';
 
 @ApiTags('Transactions')
 @ApiBearerAuth()
@@ -26,6 +30,8 @@ export class TransactionController {
   constructor(
     private readonly transactionService: TransactionService,
     private readonly receiptMigrationService: ReceiptMigrationService,
+    private readonly excelImportService: ExcelImportService,
+    private readonly receiptService: ReceiptService,
   ) {}
 
   @Get()
@@ -103,5 +109,47 @@ export class TransactionController {
   @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
   async migrateReceipts() {
     return this.receiptMigrationService.migrateReceiptsToYearFolders();
+  }
+
+  @Post('import-excel')
+  @ApiOperation({ summary: 'Importa transazioni da file Excel o CSV' })
+  @ApiConsumes('multipart/form-data')
+  @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
+  async importExcel(@Req() request: FastifyRequest) {
+    const body = request.body as any;
+    const file = body.file;
+    
+    if (!file) {
+      throw new BadRequestException('Nessun file caricato');
+    }
+
+    const allowedMimes = [
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'application/octet-stream',
+      'text/csv',
+      'text/plain',
+    ];
+    
+    const filename = file.filename || 'file.xlsx';
+    const mimetype = file.mimetype || '';
+    
+    if (!allowedMimes.includes(mimetype) && !filename.match(/\.(xlsx|xls|csv)$/i)) {
+      throw new BadRequestException('Il file deve essere un file Excel (.xlsx, .xls) o CSV (.csv)');
+    }
+
+    const buffer = await file.toBuffer();
+    return this.excelImportService.importFromFile(buffer, filename);
+  }
+
+  @Post('regenerate-receipts/:year')
+  @ApiOperation({ summary: 'Rigenera tutte le ricevute per un anno con numeri sequenziali corretti' })
+  @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
+  async regenerateReceipts(@Param('year') year: string) {
+    const yearNum = parseInt(year, 10);
+    if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      throw new BadRequestException('Anno non valido');
+    }
+    return this.receiptService.regenerateReceiptsForYear(yearNum);
   }
 }

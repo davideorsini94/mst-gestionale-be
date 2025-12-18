@@ -1,4 +1,12 @@
-import 'dotenv/config';
+import { config } from 'dotenv';
+import { existsSync } from 'fs';
+
+// Carica .env_local se esiste, altrimenti fallback su .env
+if (existsSync('.env_local')) {
+  config({ path: '.env_local' });
+} else {
+  config({ path: '.env' });
+}
 import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import {
