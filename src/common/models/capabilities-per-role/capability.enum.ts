@@ -30,6 +30,9 @@ export enum Capability {
   CAN_MANAGE_SETTINGS = 'CAN_MANAGE_SETTINGS',
   CAN_VIEW_SETTINGS = 'CAN_VIEW_SETTINGS',
   
+  // Backup e Restore
+  CAN_MANAGE_BACKUP = 'CAN_MANAGE_BACKUP',
+  
   // Dashboard
   CAN_VIEW_DASHBOARD = 'CAN_VIEW_DASHBOARD',
 }

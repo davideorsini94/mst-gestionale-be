@@ -20,7 +20,7 @@ import { dataSource } from './datasources/data-source';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { seedRoles } from './seeds/seed-roles';
 
-export const BODY_LIMIT_IN_MB = 100;
+export const BODY_LIMIT_IN_MB = 2000; // 2GB per backup di grandi dimensioni
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -43,7 +43,14 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document);
 
-  await app.register(fastifyMultipart, { attachFieldsToBody: true });
+  await app.register(fastifyMultipart, {
+    attachFieldsToBody: true,
+    limits: {
+      fileSize: BODY_LIMIT_IN_MB * 1_000_000, // 100MB
+      files: 1,
+      fieldSize: BODY_LIMIT_IN_MB * 1_000_000,
+    },
+  });
   app.useGlobalPipes(new ValidationPipe());
   app.setGlobalPrefix('api');
   app.enableCors({
