@@ -14,6 +14,9 @@ export class BaseAndFilters<T> {
   like?: RecursivePartial<T>;
   moreThan?: RecursivePartial<T>;
   lessThan?: RecursivePartial<T>;
+  moreThanOrEqual?: RecursivePartial<T>;
+  lessThanOrEqual?: RecursivePartial<T>;
+  between?: RecursivePartial<T>;
   isNull?: RecursiveBooleanPartial<T>;
 }
 
@@ -23,6 +26,8 @@ export class BaseOrFilters<T> {
   like?: RecursivePartial<T>;
   moreThan?: RecursivePartial<T>;
   lessThan?: RecursivePartial<T>;
+  moreThanOrEqual?: RecursivePartial<T>;
+  lessThanOrEqual?: RecursivePartial<T>;
   isNull?: RecursiveBooleanPartial<T>;
 }
 

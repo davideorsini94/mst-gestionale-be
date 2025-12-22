@@ -1,5 +1,6 @@
 import { FindManyOptions } from 'typeorm/find-options/FindManyOptions';
 import {
+  Between,
   DataSource,
   FindOneOptions,
   FindOperator,
@@ -10,7 +11,9 @@ import {
   In,
   IsNull,
   LessThan,
+  LessThanOrEqual,
   MoreThan,
+  MoreThanOrEqual,
   Not,
   Repository,
   SelectQueryBuilder,
@@ -117,6 +120,21 @@ export abstract class BaseService<
 
       this.addAndFilter(andFilters.lessThan, baseWhereCondition, options, (value) => {
         return LessThan(value);
+      });
+
+      this.addAndFilter(andFilters.moreThanOrEqual, baseWhereCondition, options, (value) => {
+        return MoreThanOrEqual(value);
+      });
+
+      this.addAndFilter(andFilters.lessThanOrEqual, baseWhereCondition, options, (value) => {
+        return LessThanOrEqual(value);
+      });
+
+      this.addAndFilter(andFilters.between, baseWhereCondition, options, (value) => {
+        if (Array.isArray(value) && value.length === 2) {
+          return Between(value[0], value[1]);
+        }
+        return value as FindOperator<any>;
       });
 
       this.addAndFilter(andFilters.isNull, baseWhereCondition, options, (value) => {
@@ -414,17 +432,23 @@ export abstract class BaseService<
     filters: RecursivePartial<T> | RecursiveBooleanPartial<T>,
     condition: FindOptionsWhere<T>,
     options: FindManyOptions<T>,
-    operator: (value: string | FindOperator<any> | boolean) => FindOperator<any>,
+    operator: (value: string | FindOperator<any> | boolean | any[]) => FindOperator<any>,
     isNot = false,
   ) {
     for (const key of Object.keys(filters ?? [])) {
       if (Array.isArray(filters[key])) {
         const values = filters[key];
 
-        if (isNot) {
-          condition[key] = Not(In(values));
+        // Se l'array ha 2 elementi, potrebbe essere un Between, lascia che l'operatore lo gestisca
+        if (values.length === 2 && typeof values[0] === 'string' && typeof values[1] === 'string') {
+          condition[key] = operator(values);
         } else {
-          condition[key] = In(values);
+          // Altrimenti è un In
+          if (isNot) {
+            condition[key] = Not(In(values));
+          } else {
+            condition[key] = In(values);
+          }
         }
       } else if (typeof filters[key] === 'object') {
         let hasNonEmptyFilter = false;
