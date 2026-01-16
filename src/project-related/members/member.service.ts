@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Inject, forwardRef } from '@nestjs/common';
 import { BaseService } from '../../common/base-crud/base.service';
 import { Member, MemberDocument, MemberDocumentType, Gender, MemberType } from './entities/member.entity';
 import { CreateMemberDto } from './dto/create-member.dto';
@@ -6,6 +6,7 @@ import { UpdateMemberDto } from './dto/update-member.dto';
 import { FindOptionsOrder } from 'typeorm';
 import { dataSource } from '../../datasources/data-source';
 import { FileService } from '../../common/files/file.service';
+import { ReminderService } from '../reminders/reminder.service';
 
 export interface HotelBookingEntry {
   firstName: string;
@@ -26,8 +27,24 @@ export interface HotelBookingList {
 export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMemberDto> {
   private documentRepository = dataSource.getRepository(MemberDocument);
 
-  constructor(private readonly fileService: FileService) {
+  constructor(
+    private readonly fileService: FileService,
+    @Inject(forwardRef(() => ReminderService))
+    private readonly reminderService: ReminderService,
+  ) {
     super(Member);
+  }
+
+  async create(dto: CreateMemberDto): Promise<Member> {
+    const member = await super.create(dto);
+    await this.reminderService.updateMemberReminders(member);
+    return member;
+  }
+
+  async update(uuid: string, dto: UpdateMemberDto): Promise<Member> {
+    const member = await super.update(uuid, dto);
+    await this.reminderService.updateMemberReminders(member);
+    return member;
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Member> {
@@ -42,13 +59,13 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     if (!member) {
       throw new NotFoundException(`Member with uuid ${uuid} not found`);
     }
-    
+
     // Carica manualmente il file della foto profilo
     let profileImage = null;
     if (member.profileImageUuid) {
       profileImage = await this.fileService.findByUuid(member.profileImageUuid);
     }
-    
+
     // Carica manualmente i file dei documenti
     const documentsWithFiles = await Promise.all(
       member.documents.map(async (doc) => {
@@ -56,7 +73,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
         return { ...doc, file };
       })
     );
-    
+
     return { ...member, profileImage, documents: documentsWithFiles };
   }
 
@@ -124,7 +141,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     // Struttura: members/{uuid}/documents/{tipo}
     const docTypeFolder = documentType.toLowerCase().replace(/_/g, '-');
     const folder = `members/${memberUuid}/documents/${docTypeFolder}`;
-    
+
     // Upload file tramite FileService
     const fileEntity = await this.fileService.uploadFile(file, folder, description);
 
@@ -144,7 +161,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
       where: { memberUuid },
       order: { createdAt: 'DESC' },
     });
-    
+
     // Carica manualmente i file
     return Promise.all(
       documents.map(async (doc) => {
@@ -161,20 +178,20 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     if (!document) {
       throw new NotFoundException(`Document with uuid ${documentUuid} not found`);
     }
-    
+
     const fileUuid = document.fileUuid;
-    
+
     // Carica il file per ottenere il minioPath
     const file = fileUuid ? await this.fileService.findByUuid(fileUuid) : null;
-    
+
     // 1. Prima elimina il file da MinIO
     if (file?.minioPath) {
       await this.fileService.deleteFileFromMinio(file.minioPath);
     }
-    
+
     // 2. Elimina il documento dal DB
     await this.documentRepository.remove(document);
-    
+
     // 3. Elimina il record file dal DB
     if (fileUuid) {
       await this.fileService.deleteFileRecord(fileUuid);
@@ -192,7 +209,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     }
 
     const file = await this.fileService.findByUuid(member.profileImageUuid);
-    
+
     // 1. Prima elimina il file da MinIO
     if (file?.minioPath) {
       await this.fileService.deleteFileFromMinio(file.minioPath);
@@ -212,7 +229,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
   async uploadProfileImage(memberUuid: string, file: { filename: string; buffer: Buffer; mimetype: string }): Promise<Member> {
     console.log(`[MemberService] uploadProfileImage called for member: ${memberUuid}`);
     console.log(`[MemberService] File info - filename: ${file.filename}, mimetype: ${file.mimetype}, bufferSize: ${file.buffer?.length}`);
-    
+
     const member = await this.findByUuid(memberUuid);
     if (!member) {
       throw new NotFoundException(`Member with uuid ${memberUuid} not found`);
@@ -223,7 +240,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     // Struttura: members/{uuid}/profile
     const folder = `members/${memberUuid}/profile`;
     console.log(`[MemberService] Uploading to folder: ${folder}`);
-    
+
     const fileEntity = await this.fileService.uploadFile(file, folder, 'Profile image');
     console.log(`[MemberService] File entity created with uuid: ${fileEntity.uuid}`);
 
@@ -245,7 +262,7 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
       }
       await this.fileService.deleteFileRecord(oldProfileImageUuid);
     }
-    
+
     return savedMember;
   }
 }

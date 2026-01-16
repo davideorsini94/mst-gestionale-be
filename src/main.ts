@@ -54,15 +54,16 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe());
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: true,
+    origin: '*',
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
   });
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
   
   const port = process.env.APP_PORT || 3000;
-  await app.listen(port, '0.0.0.0');
-  console.log(`Application is running on: http://localhost:${port}`);
+  const host = process.env.APP_HOST || '0.0.0.0';
+  await app.listen(port, host);
+  console.log(`Application is running on: http://${host}:${port}`);
 }
 
 bootstrap();

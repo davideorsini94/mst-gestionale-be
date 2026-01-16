@@ -40,18 +40,18 @@ export class ExcelImportService {
   constructor(
     private readonly transactionService: TransactionService,
     private readonly categoryService: CategoryService,
-  ) {}
+  ) { }
 
   async importFromFile(buffer: Buffer, filename?: string): Promise<ImportResult> {
     // xlsx supporta sia Excel (.xlsx, .xls) che CSV nativamente
     const isCsv = filename?.toLowerCase().endsWith('.csv');
-    const workbook = XLSX.read(buffer, { 
+    const workbook = XLSX.read(buffer, {
       type: 'buffer',
       codepage: isCsv ? 65001 : undefined, // UTF-8 per CSV
     });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    
+
     // Leggi tutte le righe come array di array per gestire header non in prima riga
     const allRows: any[][] = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
@@ -66,9 +66,9 @@ export class ExcelImportService {
       if (row && row.some((cell: any) => cell && String(cell).trim().length > 0)) {
         // Verifica se questa riga sembra un header (contiene parole chiave)
         const rowStr = row.map((c: any) => String(c || '').toLowerCase()).join(' ');
-        if (rowStr.includes('data') || rowStr.includes('date') || 
-            rowStr.includes('importo') || rowStr.includes('tipo') ||
-            rowStr.includes('descrizione') || rowStr.includes('causale')) {
+        if (rowStr.includes('data') || rowStr.includes('date') ||
+          rowStr.includes('importo') || rowStr.includes('tipo') ||
+          rowStr.includes('descrizione') || rowStr.includes('causale')) {
           headerRowIndex = i;
           break;
         }
@@ -77,13 +77,13 @@ export class ExcelImportService {
 
     // Estrai header
     const headers = allRows[headerRowIndex]?.map((h: any) => String(h || '').trim()) || [];
-    
+
     // Converti le righe successive in oggetti
     const rows: ExcelTransactionRow[] = [];
     for (let i = headerRowIndex + 1; i < allRows.length; i++) {
       const rowData = allRows[i];
       if (!rowData || rowData.length === 0) continue;
-      
+
       const obj: ExcelTransactionRow = {};
       for (let j = 0; j < headers.length; j++) {
         if (headers[j] && rowData[j] !== undefined && rowData[j] !== null) {
@@ -101,10 +101,10 @@ export class ExcelImportService {
 
     // Prepara le righe con i loro indici originali e normalizza
     const processedRows: { row: ExcelTransactionRow; originalIndex: number; date: Date | null }[] = [];
-    
+
     for (let i = 0; i < rows.length; i++) {
       const row = this.normalizeRow(rows[i]);
-      
+
       // Salta righe vuote
       if (Object.keys(row).length === 0 || !this.hasValidData(row)) {
         continue;
@@ -127,24 +127,20 @@ export class ExcelImportService {
       });
     }
 
-    // Ordina per data (le transazioni senza data valida vanno alla fine)
-    processedRows.sort((a, b) => {
-      if (!a.date && !b.date) return 0;
-      if (!a.date) return 1;
-      if (!b.date) return -1;
-      return a.date.getTime() - b.date.getTime();
-    });
+    // Inverti l'ordine delle righe: le righe dal basso dell'Excel vengono inserite prima
+    // così le righe in alto avranno created_at più recente
+    processedRows.reverse();
 
-    // Processa le righe ordinate per data
+    // Processa le righe in ordine inverso (dal basso verso l'alto dell'Excel)
     for (const { row, originalIndex } of processedRows) {
       const rowNumber = headerRowIndex + originalIndex + 2; // +2 perché Excel parte da 1 e aggiungiamo l'header
 
       try {
         const transaction = await this.rowToTransaction(row);
-        
+
         // Cerca transazione esistente per data, importo e soggetto
         const existing = await this.findExistingTransaction(transaction);
-        
+
         if (existing) {
           // Aggiorna transazione esistente
           await this.transactionService.update(existing.uuid, transaction as any);
@@ -177,7 +173,7 @@ export class ExcelImportService {
 
     // Importo e Tipo - gestisce sia colonna singola che colonne separate entrate/uscite
     let importoValue: number | null = null;
-    
+
     // Caso 1: Colonne separate per entrate e uscite
     if (row.entrate !== undefined && row.entrate !== null && row.entrate !== '') {
       importoValue = this.parseNumber(row.entrate);
@@ -194,7 +190,7 @@ export class ExcelImportService {
       transaction.amount = Math.abs(importoValue);
       // Il tipo verrà determinato sotto
     }
-    
+
     if (importoValue === null || transaction.amount === undefined) {
       throw new Error('Importo mancante');
     }
@@ -203,7 +199,7 @@ export class ExcelImportService {
     if (!transaction.type) {
       if (row.tipo) {
         const tipoUpper = String(row.tipo).toUpperCase().trim();
-        
+
         // Verifica se è un tipo di transazione esplicito
         if (tipoUpper === 'ENTRATA' || tipoUpper === 'INCOME' || tipoUpper === 'E' || tipoUpper === '+') {
           transaction.type = TransactionType.INCOME;
@@ -222,7 +218,7 @@ export class ExcelImportService {
         transaction.type = importoValue >= 0 ? TransactionType.INCOME : TransactionType.EXPENSE;
       }
     }
-    
+
     // Se abbiamo la colonna tipo ma il tipo è già stato determinato, usa tipo come metodo pagamento
     if (transaction.type && row.tipo && !transaction.paymentMethod) {
       const tipoUpper = String(row.tipo).toUpperCase().trim();
@@ -297,28 +293,28 @@ export class ExcelImportService {
       const date = XLSX.SSF.parse_date_code(value);
       return new Date(date.y, date.m - 1, date.d);
     }
-    
+
     const str = String(value).trim();
-    
+
     // Prova diversi formati di data
     // DD/MM/YYYY
     let match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (match) {
       return new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
     }
-    
+
     // YYYY-MM-DD
     match = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
     if (match) {
       return new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
     }
-    
+
     // Prova parsing nativo
     const parsed = new Date(str);
     if (!isNaN(parsed.getTime())) {
       return parsed;
     }
-    
+
     throw new Error(`Formato data non valido: ${value}`);
   }
 
@@ -326,20 +322,20 @@ export class ExcelImportService {
     if (typeof value === 'number') {
       return value;
     }
-    
+
     const str = String(value).trim().replace(',', '.').replace(/[€\s]/g, '');
     const num = parseFloat(str);
-    
+
     if (isNaN(num)) {
       throw new Error(`Numero non valido: ${value}`);
     }
-    
+
     return num;
   }
 
   private parsePaymentMethod(value: string): PaymentMethod {
     const normalized = String(value).toUpperCase().trim();
-    
+
     const mapping: Record<string, PaymentMethod> = {
       'CONTANTI': PaymentMethod.CASH,
       'CASH': PaymentMethod.CASH,
@@ -359,24 +355,24 @@ export class ExcelImportService {
       'ALTRO': PaymentMethod.OTHER,
       'OTHER': PaymentMethod.OTHER,
     };
-    
+
     return mapping[normalized] || PaymentMethod.OTHER;
   }
 
   private async findExistingTransaction(transaction: Partial<Transaction>): Promise<Transaction | null> {
     // Cerca per data + importo + soggetto (chiave univoca logica)
     const queryBuilder = this.transactionService.getQueryBuilder('t');
-    
+
     queryBuilder.where('t.date = :date', { date: transaction.date });
     queryBuilder.andWhere('t.amount = :amount', { amount: transaction.amount });
     queryBuilder.andWhere('t.type = :type', { type: transaction.type });
-    
+
     if (transaction.subject) {
       queryBuilder.andWhere('t.subject = :subject', { subject: transaction.subject });
     } else {
       queryBuilder.andWhere('t.subject IS NULL');
     }
-    
+
     return queryBuilder.getOne();
   }
 
@@ -385,12 +381,12 @@ export class ExcelImportService {
    */
   private normalizeRow(row: ExcelTransactionRow): ExcelTransactionRow {
     const normalized: ExcelTransactionRow = {};
-    
+
     for (const [originalKey, value] of Object.entries(row)) {
       if (value === null || value === undefined || value === '') continue;
-      
+
       const normalizedKey = originalKey.toLowerCase().trim();
-      
+
       // Cerca se questa chiave corrisponde a un alias
       let mappedKey: string | null = null;
       for (const [standardKey, aliases] of Object.entries(COLUMN_ALIASES)) {
@@ -399,12 +395,12 @@ export class ExcelImportService {
           break;
         }
       }
-      
+
       // Usa la chiave mappata o quella originale normalizzata
       const finalKey = mappedKey || normalizedKey;
       normalized[finalKey] = value;
     }
-    
+
     return normalized;
   }
 

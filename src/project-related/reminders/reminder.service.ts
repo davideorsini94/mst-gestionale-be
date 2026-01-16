@@ -28,6 +28,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     { type: ReminderType.DRIVING_LICENSE, daysBeforeEnvVar: 'REMINDER_DAYS_DRIVING_LICENSE', defaultDays: 60 },
     { type: ReminderType.SKI_INSTRUCTOR_LICENSE, daysBeforeEnvVar: 'REMINDER_DAYS_SKI_INSTRUCTOR_LICENSE', defaultDays: 60 },
     { type: ReminderType.COACH_LICENSE, daysBeforeEnvVar: 'REMINDER_DAYS_COACH_LICENSE', defaultDays: 60 },
+    { type: ReminderType.MEMBER_MEDICAL_CERTIFICATE, daysBeforeEnvVar: 'REMINDER_DAYS_MEMBER_MEDICAL_CERTIFICATE', defaultDays: 30 },
   ];
 
   constructor(
@@ -45,7 +46,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
   private getDaysBeforeExpiry(type: ReminderType): number {
     const config = this.reminderConfigs.find(c => c.type === type);
     if (!config) return 30;
-    
+
     const envValue = process.env[config.daysBeforeEnvVar];
     return envValue ? parseInt(envValue, 10) : config.defaultDays;
   }
@@ -277,8 +278,8 @@ export class ReminderService extends BaseService<Reminder, any, any> {
       reminder.sentAt = new Date();
       reminder.errorMessage = null;
 
-      this.logger.info(`[ReminderService] Reminder sent successfully`, { 
-        uuid: reminder.uuid, 
+      this.logger.info(`[ReminderService] Reminder sent successfully`, {
+        uuid: reminder.uuid,
         type: reminder.type,
         recipient: reminder.recipientEmail,
         cc: reminder.ccEmail,
@@ -288,8 +289,8 @@ export class ReminderService extends BaseService<Reminder, any, any> {
       reminder.errorMessage = error.message;
       reminder.retryCount += 1;
 
-      this.logger.error(`[ReminderService] Failed to send reminder`, { 
-        uuid: reminder.uuid, 
+      this.logger.error(`[ReminderService] Failed to send reminder`, {
+        uuid: reminder.uuid,
         error: error.message,
       });
     }
@@ -582,5 +583,28 @@ export class ReminderService extends BaseService<Reminder, any, any> {
         { status: ReminderStatus.CANCELLED },
       );
     }
+  }
+
+  /**
+   * Aggiorna tutti i reminder per un tesserato (member)
+   */
+  async updateMemberReminders(member: {
+    uuid: string;
+    firstName: string;
+    lastName: string;
+    email?: string | null;
+    medicalExamExpiry?: Date | null;
+  }): Promise<void> {
+    const memberName = `${member.firstName} ${member.lastName}`;
+
+    await this.createOrUpdateReminderForExpiry(
+      ReminderType.MEMBER_MEDICAL_CERTIFICATE,
+      member.medicalExamExpiry || null,
+      member.uuid,
+      'Member',
+      `${memberName} - Visita Medica`,
+      member.email || null,
+      memberName,
+    );
   }
 }

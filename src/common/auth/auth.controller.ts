@@ -1,4 +1,4 @@
-import { Controller, Post, Get, UseGuards, Request } from '@nestjs/common';
+import { Controller, Post, Get, UseGuards, Request, Body } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
@@ -9,10 +9,21 @@ class LoginDto {
   password: string;
 }
 
+class ChangePasswordDto {
+  currentPassword: string;
+  newPassword: string;
+}
+
+class AdminChangePasswordDto {
+  targetUserUuid: string;
+  adminPassword: string;
+  newPassword: string;
+}
+
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(private authService: AuthService) { }
 
   @Public()
   @UseGuards(AuthGuard('local'))
@@ -34,5 +45,30 @@ export class AuthController {
       ...userWithoutPassword,
       capabilities: user.role?.capabilities?.map((c: any) => c.capability) || [],
     };
+  }
+
+  @Post('change-password')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Cambia password utente corrente' })
+  @ApiBody({ type: ChangePasswordDto })
+  async changePassword(@Request() req, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(
+      req.user.uuid,
+      dto.currentPassword,
+      dto.newPassword,
+    );
+  }
+
+  @Post('admin-change-password')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Cambia password di un altro utente (richiede password admin)' })
+  @ApiBody({ type: AdminChangePasswordDto })
+  async adminChangePassword(@Request() req, @Body() dto: AdminChangePasswordDto) {
+    return this.authService.adminChangePassword(
+      req.user.uuid,
+      dto.adminPassword,
+      dto.targetUserUuid,
+      dto.newPassword,
+    );
   }
 }

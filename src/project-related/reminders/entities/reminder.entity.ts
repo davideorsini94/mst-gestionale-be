@@ -5,10 +5,11 @@ export enum ReminderType {
   VEHICLE_TAX = 'VEHICLE_TAX',           // Scadenza bollo
   VEHICLE_INSPECTION = 'VEHICLE_INSPECTION', // Scadenza tagliando
   VEHICLE_INSURANCE = 'VEHICLE_INSURANCE',   // Scadenza assicurazione
-  MEDICAL_CERTIFICATE = 'MEDICAL_CERTIFICATE', // Scadenza certificato medico
+  MEDICAL_CERTIFICATE = 'MEDICAL_CERTIFICATE', // Scadenza certificato medico staff
   DRIVING_LICENSE = 'DRIVING_LICENSE',       // Scadenza patente
   SKI_INSTRUCTOR_LICENSE = 'SKI_INSTRUCTOR_LICENSE', // Scadenza licenza maestro
   COACH_LICENSE = 'COACH_LICENSE',           // Scadenza licenza allenatore
+  MEMBER_MEDICAL_CERTIFICATE = 'MEMBER_MEDICAL_CERTIFICATE', // Scadenza visita medica tesserato
 }
 
 export enum ReminderStatus {

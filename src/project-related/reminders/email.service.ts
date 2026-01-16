@@ -21,6 +21,7 @@ const reminderTypeLabels: Record<ReminderType, string> = {
   [ReminderType.DRIVING_LICENSE]: 'Scadenza Patente',
   [ReminderType.SKI_INSTRUCTOR_LICENSE]: 'Scadenza Licenza Maestro di Sci',
   [ReminderType.COACH_LICENSE]: 'Scadenza Licenza Allenatore',
+  [ReminderType.MEMBER_MEDICAL_CERTIFICATE]: 'Scadenza Visita Medica Tesserato',
 };
 
 @Injectable()
@@ -28,7 +29,7 @@ export class EmailService {
   constructor(
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
     private readonly settingsService: SettingsService,
-  ) {}
+  ) { }
 
   private async getSmtpConfig(): Promise<SmtpConfig | null> {
     const setting = await this.settingsService.findByKey('smtpConfig');
@@ -40,7 +41,7 @@ export class EmailService {
 
   private async createTransporter(): Promise<nodemailer.Transporter | null> {
     const config = await this.getSmtpConfig();
-    
+
     if (config && config.host && config.user && config.pass) {
       return nodemailer.createTransport({
         host: config.host,
@@ -49,7 +50,7 @@ export class EmailService {
         auth: { user: config.user, pass: config.pass },
       });
     }
-    
+
     this.logger.warn('[EmailService] SMTP not configured - emails will be logged only');
     return null;
   }

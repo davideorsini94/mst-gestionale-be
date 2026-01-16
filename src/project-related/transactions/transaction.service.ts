@@ -18,7 +18,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Transaction> {
-    return { date: 'DESC' };
+    return { date: 'DESC', createdAt: 'DESC' };
   }
 
   protected getDefaultRelations() {
@@ -98,10 +98,26 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
 
   async deleteTransaction(uuid: string): Promise<void> {
     const transaction = await this.findByUuid(uuid);
-    if (transaction && transaction.receiptMinioPath) {
+    if (!transaction) {
+      return;
+    }
+
+    const wasIncome = transaction.type === TransactionType.INCOME;
+    const receiptYear = transaction.receiptYear;
+
+    // Elimina la ricevuta se esiste
+    if (transaction.receiptMinioPath) {
       await this.receiptService.deleteReceipt(transaction.receiptMinioPath);
     }
+
+    // Elimina la transazione
     await this.delete(uuid);
+
+    // Se era un'entrata, rigenera tutte le ricevute dell'anno per mantenere la numerazione coerente
+    if (wasIncome && receiptYear) {
+      console.log(`[TransactionService] Rigenerazione ricevute per anno ${receiptYear} dopo eliminazione`);
+      await this.receiptService.regenerateReceiptsForYear(receiptYear);
+    }
   }
 
   async getReceiptStream(uuid: string): Promise<any> {
@@ -184,7 +200,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
       byCategory: Array.from(categoryMap.values()),
       byMonth: Array.from(monthMap.entries())
         .map(([month, data]) => ({ month, ...data }))
-        .sort((a, b) => a.month.localeCompare(b.month)),
+        .sort((a, b) => b.month.localeCompare(a.month)),
     };
   }
 }
