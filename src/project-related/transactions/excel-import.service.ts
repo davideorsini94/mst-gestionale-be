@@ -3,6 +3,7 @@ import { TransactionService } from './transaction.service';
 import { AmountReviewStatus, Transaction, TransactionType, PaymentMethod } from './entities/transaction.entity';
 import { CategoryService } from '../categories/category.service';
 import { CategoryType } from '../categories/entities/category.entity';
+import { categoryFromNote } from '../categories/note-categories';
 import { blindIndex } from '../../common/crypto/field-crypto';
 import {
   DecimalSeparator,
@@ -289,9 +290,10 @@ export class ExcelImportService {
     if (text('soggetto')) transaction.subject = text('soggetto');
     if (text('descrizione')) transaction.description = text('descrizione');
 
-    // Categoria - trova o crea
-    if (text('categoria')) {
-      const category = await this.categoryService.findOrCreateByName(text('categoria'), CategoryType.BOTH);
+    // Categoria - trova o crea; senza colonna categoria viene dedotta dalle note
+    const categoryName = text('categoria') || categoryFromNote(text('note'));
+    if (categoryName) {
+      const category = await this.categoryService.findOrCreateByName(categoryName, CategoryType.BOTH);
       transaction.categoryUuid = category.uuid;
     }
 
