@@ -52,6 +52,55 @@ export class EmailService {
     return null;
   }
 
+  /**
+   * Email di prova a un indirizzo qualsiasi. Usa la configurazione passata (i valori del form, anche non salvati)
+   * completata con quella salvata; se la password non è indicata si usa quella salvata.
+   * Gli errori SMTP vengono restituiti in chiaro all'utente per capire cosa non va.
+   */
+  async sendTestEmail(to: string, override?: Partial<SmtpConfig>): Promise<{ messageId: string; usedHost: string }> {
+    const saved = (await this.getSmtpConfig()) ?? ({} as SmtpConfig);
+    const pick = <K extends keyof SmtpConfig>(key: K) =>
+      override?.[key] !== undefined && override?.[key] !== null && override?.[key] !== '' ? override[key] : saved[key];
+    const config: SmtpConfig = {
+      host: pick('host') as string,
+      port: Number(pick('port')) || 587,
+      user: pick('user') as string,
+      pass: pick('pass') as string,
+      from: pick('from') as string,
+    };
+    if (!config.host) {
+      throw new Error('SMTP non configurato: indica almeno il server');
+    }
+
+    const transporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.port === 465,
+      auth: config.user ? { user: config.user, pass: config.pass } : undefined,
+      // un server sbagliato non deve tenere bloccata la richiesta per minuti
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
+    });
+
+    const now = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+    const info = await transporter.sendMail({
+      from: config.from || config.user,
+      to,
+      subject: '[MST Gestionale] Email di prova',
+      html: `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; color: #1f2937;">
+  <h2 style="color: #1F3A72;">Email di prova</h2>
+  <p>Se stai leggendo questo messaggio, l'invio delle email dal gestionale MST funziona.</p>
+  <p style="color: #6b7280; font-size: 13px;">Inviata il ${now} tramite ${config.host}:${config.port}.</p>
+</body></html>`.trim(),
+    });
+    this.logger.info(`[EmailService] Email di prova inviata a ${to} via ${config.host}:${config.port}`);
+    return { messageId: info.messageId, usedHost: `${config.host}:${config.port}` };
+  }
+
   async sendReminderEmail(
     recipientEmail: string,
     recipientName: string,
