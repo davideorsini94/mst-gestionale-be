@@ -14,7 +14,7 @@ import type { StringValue } from 'ms';
     UserModule,
     PassportModule,
     JwtModule.register({
-      secret: process.env.JWT_SECRET || 'your-secret-key',
+      secret: process.env.JWT_SECRET,
       signOptions: { expiresIn: (process.env.TOKEN_DURATION || '8h') as StringValue },
     }),
   ],

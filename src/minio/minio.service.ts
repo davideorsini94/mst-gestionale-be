@@ -1,6 +1,18 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, PayloadTooLargeException } from '@nestjs/common';
 import { MinioService as NestMinioService } from 'nestjs-minio-client';
 import { Readable } from 'stream';
+import { decryptFile, encryptFile } from '../common/crypto/field-crypto';
+
+/** Dimensione massima di un file gestito dall'app (i file vengono cifrati/decifrati in memoria). */
+export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
 
 @Injectable()
 export class MinioService {
@@ -71,20 +83,27 @@ export class MinioService {
     }
   }
 
+  /**
+   * Carica un file cifrandolo (AES-256-GCM). Un buffer già cifrato (es. restore di un backup) non viene ricifrato.
+   */
   async uploadFile(
     objectName: string,
     buffer: Buffer,
     contentType?: string,
   ): Promise<string> {
-    console.log(`[MinIO] Uploading file: ${objectName}, size: ${buffer.length}, contentType: ${contentType}`);
-    
+    if (buffer.length > MAX_FILE_SIZE_BYTES) {
+      throw new PayloadTooLargeException(`File troppo grande (max ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB)`);
+    }
+    return this.uploadRaw(objectName, encryptFile(buffer), contentType);
+  }
+
+  /** Carica i byte così come sono (già cifrati). */
+  async uploadRaw(objectName: string, buffer: Buffer, contentType?: string): Promise<string> {
     await this.ensureBucket();
-    
+
     const sanitizedObjectName = this.sanitizePath(objectName);
-    console.log(`[MinIO] Sanitized path: ${sanitizedObjectName}`);
-    
     const metaData = contentType ? { 'Content-Type': contentType } : {};
-    
+
     try {
       await this.minioClient.client.putObject(
         this.bucketName,
@@ -93,29 +112,31 @@ export class MinioService {
         buffer.length,
         metaData,
       );
-      console.log(`[MinIO] File uploaded successfully to bucket: ${this.bucketName}, path: ${sanitizedObjectName}`);
     } catch (error) {
-      console.error(`[MinIO] Error uploading file:`, error);
+      console.error(`[MinIO] Error uploading file ${sanitizedObjectName}:`, error);
       throw error;
     }
-    
+
     return sanitizedObjectName;
   }
 
+  /** Restituisce il contenuto decifrato del file (i file legacy non cifrati vengono restituiti invariati). */
   async getFile(objectName: string): Promise<Readable> {
-    return this.minioClient.client.getObject(this.bucketName, objectName);
+    return Readable.from([await this.getFileBuffer(objectName)]);
+  }
+
+  async getFileBuffer(objectName: string): Promise<Buffer> {
+    return decryptFile(await this.getRawBuffer(objectName));
+  }
+
+  /** Byte così come sono salvati su MinIO (cifrati): per backup e migrazioni. */
+  async getRawBuffer(objectName: string): Promise<Buffer> {
+    const stream = await this.minioClient.client.getObject(this.bucketName, objectName);
+    return streamToBuffer(stream);
   }
 
   async deleteFile(objectName: string): Promise<void> {
     await this.minioClient.client.removeObject(this.bucketName, objectName);
-  }
-
-  async getPresignedUrl(objectName: string, expirySeconds: number = 3600): Promise<string> {
-    return this.minioClient.client.presignedGetObject(
-      this.bucketName,
-      objectName,
-      expirySeconds,
-    );
   }
 
   async listFiles(prefix?: string): Promise<string[]> {

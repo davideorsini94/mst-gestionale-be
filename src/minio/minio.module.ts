@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MinioModule as NestMinioModule } from 'nestjs-minio-client';
 import { MinioService } from './minio.service';
+import { StorageEncryptionMigration } from './storage-encryption.migration';
 
 // Rimuovi http:// o https:// dall'endpoint se presente
 const sanitizeEndpoint = (endpoint: string): string => {
@@ -17,7 +18,7 @@ const minioOptions = {
 
 @Module({
   imports: [NestMinioModule.register(minioOptions)],
-  providers: [MinioService],
-  exports: [MinioService],
+  providers: [MinioService, StorageEncryptionMigration],
+  exports: [MinioService, StorageEncryptionMigration],
 })
 export class MinioModule {}

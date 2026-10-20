@@ -7,6 +7,7 @@ import { FindOptionsOrder } from 'typeorm';
 import { dataSource } from '../../datasources/data-source';
 import { FileService } from '../../common/files/file.service';
 import { ReminderService } from '../reminders/reminder.service';
+import { blindIndex } from '../../common/crypto/field-crypto';
 
 @Injectable()
 export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaffDto> {
@@ -37,8 +38,10 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   }
 
   async findByEmail(email: string): Promise<Staff | null> {
-    if (!email) return null;
-    return this.repo.findOne({ where: { email } });
+    // L'email è cifrata: la ricerca esatta usa il blind index
+    const emailHash = blindIndex(email, 'ci');
+    if (!emailHash) return null;
+    return this.repo.findOne({ where: { emailHash } });
   }
 
   async findByLinkedUserUuid(userUuid: string): Promise<Staff | null> {
@@ -113,6 +116,14 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
         return { ...doc, file };
       })
     );
+  }
+
+  async getDocumentStaffUuid(documentUuid: string): Promise<string> {
+    const document = await this.documentRepository.findOne({ where: { uuid: documentUuid } });
+    if (!document) {
+      throw new NotFoundException(`Document with uuid ${documentUuid} not found`);
+    }
+    return document.staffUuid;
   }
 
   async deleteDocument(documentUuid: string): Promise<void> {

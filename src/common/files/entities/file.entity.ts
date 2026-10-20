@@ -1,4 +1,5 @@
 import { Entity, Column } from 'typeorm';
+import { EncryptedColumn } from '../../crypto/encrypted-column';
 import { IctBaseEntity } from '../../base-crud/ict-base.entity';
 
 export enum FileType {
@@ -9,7 +10,7 @@ export enum FileType {
 
 @Entity('files')
 export class File extends IctBaseEntity {
-  @Column()
+  @EncryptedColumn()
   originalName: string;
 
   @Column()
@@ -24,6 +25,6 @@ export class File extends IctBaseEntity {
   @Column({ type: 'enum', enum: FileType, default: FileType.OTHER })
   fileType: FileType;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   description: string;
 }

@@ -34,6 +34,22 @@ export class ReceiptService {
     };
   }
 
+  /** Percorso della ricevuta: nessun dato personale nel nome (il PDF è comunque cifrato). */
+  private receiptPath(transaction: Transaction, year: number): string {
+    return `ricevute/${year}/${transaction.uuid}.pdf`;
+  }
+
+  /** Cancella la vecchia ricevuta solo se il nuovo PDF è stato salvato in un percorso diverso. */
+  private async deleteIfReplaced(oldPath: string | null | undefined, newPath: string): Promise<void> {
+    if (oldPath && oldPath !== newPath) {
+      try {
+        await this.minioService.deleteFile(oldPath);
+      } catch (error) {
+        console.error(`[ReceiptService] Error deleting old receipt ${oldPath}:`, error);
+      }
+    }
+  }
+
   private getAssetsPath(): string {
     return path.join(__dirname, 'assets');
   }
@@ -142,12 +158,7 @@ export class ReceiptService {
       transaction.receiptYear = year;
 
       const pdfBuffer = await this.generateReceiptPdf(transaction);
-
-      const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
-      const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
-      const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
-
-      const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
+      const minioPath = await this.minioService.uploadFile(this.receiptPath(transaction, year), pdfBuffer, 'application/pdf');
 
       return { minioPath, receiptNumber, receiptYear: year };
     } finally {
@@ -156,14 +167,7 @@ export class ReceiptService {
   }
 
   async updateReceipt(transaction: Transaction): Promise<{ minioPath: string; receiptNumber: number; receiptYear: number }> {
-    if (transaction.receiptMinioPath) {
-      try {
-        await this.minioService.deleteFile(transaction.receiptMinioPath);
-      } catch (error) {
-        console.error('Error deleting old receipt:', error);
-      }
-    }
-
+    const oldPath = transaction.receiptMinioPath;
     const transactionDate = new Date(transaction.date);
     const year = transactionDate.getFullYear();
 
@@ -184,13 +188,10 @@ export class ReceiptService {
     transaction.receiptNumber = receiptNumber;
     transaction.receiptYear = receiptYear;
 
+    // Prima si salva il nuovo PDF, poi si elimina il vecchio: se la generazione fallisce la ricevuta resta
     const pdfBuffer = await this.generateReceiptPdf(transaction);
-
-    const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
-    const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
-    const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
-
-    const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
+    const minioPath = await this.minioService.uploadFile(this.receiptPath(transaction, receiptYear), pdfBuffer, 'application/pdf');
+    await this.deleteIfReplaced(oldPath, minioPath);
 
     return { minioPath, receiptNumber, receiptYear };
   }
@@ -232,32 +233,20 @@ export class ReceiptService {
 
       for (const transaction of transactions) {
         try {
-          // Elimina la vecchia ricevuta se esiste
-          if (transaction.receiptMinioPath) {
-            try {
-              await this.minioService.deleteFile(transaction.receiptMinioPath);
-            } catch (e) {
-              // Ignora errori di eliminazione
-            }
-          }
+          const oldPath = transaction.receiptMinioPath;
 
           // Assegna il nuovo numero
           transaction.receiptNumber = receiptNumber;
           transaction.receiptYear = year;
 
-          // Genera il nuovo PDF
+          // Genera il nuovo PDF e lo salva prima di eliminare il vecchio
           const pdfBuffer = await this.generateReceiptPdf(transaction);
+          const minioPath = await this.minioService.uploadFile(this.receiptPath(transaction, year), pdfBuffer, 'application/pdf');
 
-          const transactionDate = new Date(transaction.date);
-          const sanitizedSubject = (transaction.subject || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
-          const dateStr = `${year}${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}${transactionDate.getDate().toString().padStart(2, '0')}`;
-          const filename = `ricevute/${year}/${receiptNumber}-${sanitizedSubject}_${dateStr}.pdf`;
-
-          const minioPath = await this.minioService.uploadFile(filename, pdfBuffer, 'application/pdf');
-
-          // Aggiorna la transazione
+          // Aggiorna la transazione, poi elimina l'eventuale vecchio file
           transaction.receiptMinioPath = minioPath;
           await this.transactionRepo.save(transaction);
+          await this.deleteIfReplaced(oldPath, minioPath);
 
           receiptNumber++;
           result.regenerated++;

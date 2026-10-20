@@ -3,7 +3,11 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { MinioService } from 'src/minio/minio.service';
+import { MAX_FILE_SIZE_BYTES, MinioService } from 'src/minio/minio.service';
+import { dataSource } from '../../datasources/data-source';
+import { StorageEncryptionMigration } from '../../minio/storage-encryption.migration';
+import { keyCheckMatches } from '../../common/crypto/field-crypto';
+import { KEY_CHECK_SETTING } from '../../migrations/1760900001000-EncryptSensitiveData';
 
 const execAsync = promisify(exec);
 
@@ -12,7 +16,10 @@ export class BackupService {
   private readonly logger = new Logger(BackupService.name);
   private readonly backupDir = path.join(process.cwd(), 'backups');
 
-  constructor(private readonly minioService: MinioService) {
+  constructor(
+    private readonly minioService: MinioService,
+    private readonly storageMigration: StorageEncryptionMigration,
+  ) {
     if (!fs.existsSync(this.backupDir)) {
       fs.mkdirSync(this.backupDir, { recursive: true });
     }
@@ -99,10 +106,33 @@ export class BackupService {
         );
       }
       
-      const command = `PGPASSWORD="${dbPassword}" pg_restore -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${dbName} -c -v "${backupPath}"`;
-      
+      // Il file deve essere un archivio leggibile PRIMA di toccare il database
+      try {
+        await execAsync(`pg_restore --list "${backupPath}" > /dev/null`);
+      } catch {
+        throw new Error('Il file non è un backup del database valido: nessuna modifica effettuata');
+      }
+
+      // Schema pulito prima del restore: con "-c" la tabella migrations della versione attuale sopravviverebbe a un
+      // dump di una versione precedente (le migrazioni risulterebbero eseguite su dati non migrati).
+      await dataSource.query('DROP SCHEMA public CASCADE');
+      await dataSource.query('CREATE SCHEMA public');
+      const command = `PGPASSWORD="${dbPassword}" pg_restore -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${dbName} --no-owner -v "${backupPath}"`;
+
       await execAsync(command);
-      
+
+      // Porta il DB ripristinato alla versione attuale (cifratura compresa) e allinea i file
+      const executed = await dataSource.runMigrations({ transaction: 'each' });
+      this.logger.log(`Migrazioni eseguite dopo il restore: ${executed.map((m) => m.name).join(', ') || 'nessuna'}`);
+      // Un backup cifrato con altre chiavi renderebbe i dati illeggibili (e mescolati con i nuovi)
+      const check = await dataSource.query(`SELECT value FROM settings WHERE key = $1`, [KEY_CHECK_SETTING]);
+      if (!check.length || !keyCheckMatches(check[0].value)) {
+        throw new Error(
+          'Il backup ripristinato è cifrato con chiavi diverse da quelle attuali: ripristina un backup compatibile',
+        );
+      }
+      await this.storageMigration.run();
+
       this.logger.log('Database restore completed successfully');
     } catch (error) {
       this.logger.error(`Failed to restore database: ${error.message}`, error.stack);
@@ -134,15 +164,8 @@ export class BackupService {
           fs.mkdirSync(objectDir, { recursive: true });
         }
 
-        const stream = await this.minioService.getFile(objectName);
-        const writeStream = fs.createWriteStream(objectPath);
-        
-        await new Promise((resolve, reject) => {
-          stream.pipe(writeStream);
-          stream.on('error', reject);
-          writeStream.on('error', reject);
-          writeStream.on('finish', () => resolve(null));
-        });
+        // Byte così come sono su MinIO: il backup resta cifrato (serve la chiave dell'app per leggerlo)
+        fs.writeFileSync(objectPath, await this.minioService.getRawBuffer(objectName));
       }
 
       const tarCommand = `tar -cf "${backupPath}" -C "${tempDir}" .`;
@@ -214,7 +237,13 @@ export class BackupService {
             try {
               const buffer = fs.readFileSync(fullPath);
               this.logger.log(`[MinIO Restore] Uploading file: ${objectName} (${buffer.length} bytes)`);
-              await this.minioService.uploadFile(objectName, buffer);
+              // uploadFile non ricifra i file già cifrati e cifra quelli di backup vecchi in chiaro
+              if (buffer.length > MAX_FILE_SIZE_BYTES) {
+                // file oltre il limite dell'app: si carica così com'è invece di interrompere il restore
+                await this.minioService.uploadRaw(objectName, buffer);
+              } else {
+                await this.minioService.uploadFile(objectName, buffer);
+              }
               filesUploaded++;
               totalSize += buffer.length;
               this.logger.log(`[MinIO Restore] ✓ Restored object ${filesUploaded}: ${objectName}`);

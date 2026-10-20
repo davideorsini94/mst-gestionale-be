@@ -1,8 +1,11 @@
-import { Controller, Post, Get, UseGuards, Request, Body } from '@nestjs/common';
+import { Controller, Post, Get, Put, UseGuards, Request, Body } from '@nestjs/common';
+import { RouteConfig } from '@nestjs/platform-fastify';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { Public } from './decorators/public.decorator';
+import { UserService } from '../models/users/user.service';
+import { UserPreferences } from '../models/users/entities/user.entity';
 
 class LoginDto {
   username: string;
@@ -14,6 +17,11 @@ class ChangePasswordDto {
   newPassword: string;
 }
 
+class PreferencesDto {
+  theme?: 'light' | 'dark' | 'system';
+  reduceTransparency?: boolean;
+}
+
 class AdminChangePasswordDto {
   targetUserUuid: string;
   adminPassword: string;
@@ -23,10 +31,15 @@ class AdminChangePasswordDto {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) { }
+  constructor(
+    private authService: AuthService,
+    private userService: UserService,
+  ) { }
 
   @Public()
   @UseGuards(AuthGuard('local'))
+  // Max 10 tentativi al minuto per IP (dietro nginx l'IP arriva da X-Forwarded-For: trustProxy in main.ts)
+  @RouteConfig({ rateLimit: { max: 10, timeWindow: '1 minute' } })
   @Post('login')
   @ApiOperation({ summary: 'Login utente' })
   @ApiBody({ type: LoginDto })
@@ -39,12 +52,21 @@ export class AuthController {
   @ApiOperation({ summary: 'Ottieni info utente corrente' })
   async me(@Request() req) {
     const user = req.user;
-    // Rimuovi la password dalla risposta
-    const { password, ...userWithoutPassword } = user;
+    // Password e blind index non vengono mai caricati (select: false); per sicurezza si escludono comunque
+    const { password, emailHash, ...userWithoutPassword } = user;
     return {
       ...userWithoutPassword,
+      preferences: user.preferences ?? {},
       capabilities: user.role?.capabilities?.map((c: any) => c.capability) || [],
     };
+  }
+
+  @Put('preferences')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Salva le preferenze dell\'utente corrente (tema, trasparenza)' })
+  @ApiBody({ type: PreferencesDto })
+  async updatePreferences(@Request() req, @Body() dto: PreferencesDto): Promise<UserPreferences> {
+    return this.userService.updatePreferences(req.user.uuid, dto);
   }
 
   @Post('change-password')

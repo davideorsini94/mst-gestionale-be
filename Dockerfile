@@ -36,6 +36,9 @@ RUN npm run build
 RUN rm -rf ./src
 RUN rm -rf ./.github
 
+# In produzione nessun file .env viene letto (vedi src/main.ts): le variabili arrivano dall'ambiente del container
+ENV NODE_ENV=production
+
 # Esegui l'applicazione all'avvio del container
 CMD ["node", "./dist/main"]
 

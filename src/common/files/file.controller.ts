@@ -9,6 +9,8 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { FastifyReply } from 'fastify';
 import { FileService } from './file.service';
+import { RequireAnyCapability } from '../auth/decorators/capabilities.decorator';
+import { Capability } from '../models/capabilities-per-role/capability.enum';
 
 @ApiTags('Files')
 @ApiBearerAuth()
@@ -18,6 +20,7 @@ export class FileController {
 
   @Get(':uuid')
   @ApiOperation({ summary: 'Download file by UUID' })
+  @RequireAnyCapability(Capability.CAN_VIEW_MEMBERS, Capability.CAN_VIEW_STAFF)
   async getFile(
     @Param('uuid') uuid: string,
     @Res({ passthrough: true }) res: FastifyReply,
@@ -31,6 +34,7 @@ export class FileController {
 
   @Get(':uuid/download')
   @ApiOperation({ summary: 'Download file as attachment' })
+  @RequireAnyCapability(Capability.CAN_VIEW_MEMBERS, Capability.CAN_VIEW_STAFF)
   async downloadFile(
     @Param('uuid') uuid: string,
     @Res({ passthrough: true }) res: FastifyReply,
@@ -43,6 +47,7 @@ export class FileController {
 
   @Delete(':uuid')
   @ApiOperation({ summary: 'Delete file' })
+  @RequireAnyCapability(Capability.CAN_MANAGE_MEMBERS, Capability.CAN_MANAGE_STAFF)
   async deleteFile(@Param('uuid') uuid: string) {
     await this.fileService.deleteFile(uuid);
     return { success: true };

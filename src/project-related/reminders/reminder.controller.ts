@@ -23,6 +23,13 @@ export class ReminderController {
     return this.reminderService.getAllReminders(filters);
   }
 
+  @Get('counts')
+  @ApiOperation({ summary: 'Numero di reminder per stato' })
+  @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
+  async counts() {
+    return this.reminderService.getCounts();
+  }
+
   @Get('scheduled')
   @ApiOperation({ summary: 'Lista reminder programmati' })
   @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)

@@ -1,4 +1,5 @@
 import { Entity, Column } from 'typeorm';
+import { EncryptedColumn } from '../../../common/crypto/encrypted-column';
 import { IctBaseEntity } from '../../../common/base-crud/ict-base.entity';
 
 export enum ReminderType {
@@ -36,13 +37,13 @@ export class Reminder extends IctBaseEntity {
   @Column({ type: 'timestamp', nullable: true })
   sentAt: Date;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   recipientEmail: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   ccEmail: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   recipientName: string;
 
   @Column({ nullable: true })
@@ -51,10 +52,10 @@ export class Reminder extends IctBaseEntity {
   @Column({ nullable: true })
   subjectEntityType: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   subjectDescription: string;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   errorMessage: string;
 
   @Column({ default: 0 })

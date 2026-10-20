@@ -51,17 +51,18 @@ export class DashboardController {
   }
 
   private async getAdminDashboard(daysAhead: number) {
-    const [vehicleExpiries, staffList, memberList] = await Promise.all([
+    // Solo conteggi: non serve caricare (e decifrare) tutte le anagrafiche
+    const [vehicleExpiries, totalStaff, totalMembers] = await Promise.all([
       this.vehicleService.getExpiringDocuments(daysAhead),
-      this.staffService.find({}, null),
-      this.memberService.find({}, null),
+      this.staffService.count(),
+      this.memberService.count(),
     ]);
 
     return {
       type: 'admin',
       stats: {
-        totalStaff: staffList.length,
-        totalMembers: memberList.length,
+        totalStaff,
+        totalMembers,
       },
       vehicleExpiries,
     };

@@ -1,4 +1,5 @@
 import { Entity, Column, OneToMany, JoinColumn, ManyToOne } from 'typeorm';
+import { EncryptedColumn } from '../../../common/crypto/encrypted-column';
 import { IctBaseEntity } from '../../../common/base-crud/ict-base.entity';
 
 export enum StaffRole {
@@ -30,37 +31,43 @@ export enum CoachLevel {
 
 @Entity('staff')
 export class Staff extends IctBaseEntity {
-  @Column()
+  @EncryptedColumn()
   firstName: string;
 
-  @Column()
+  @EncryptedColumn()
   lastName: string;
 
   @Column({ type: 'enum', enum: Gender, nullable: true })
   gender: Gender;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true, hash: { property: 'fiscalCodeHash', kind: 'ci' } })
   fiscalCode: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
+  fiscalCodeHash: string;
+
+  @EncryptedColumn({ nullable: true, hash: { property: 'emailHash', kind: 'ci' } })
   email: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
+  emailHash: string;
+
+  @EncryptedColumn({ nullable: true })
   phone: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   address: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   city: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   postalCode: string;
 
-  @Column({ type: 'date', nullable: true })
-  birthDate: Date;
+  @EncryptedColumn({ nullable: true, date: true })
+  birthDate: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   birthPlace: string;
 
   @Column({ type: 'enum', enum: StaffRole, default: StaffRole.OTHER })
@@ -75,13 +82,13 @@ export class Staff extends IctBaseEntity {
   @Column({ type: 'date', nullable: true })
   endDate: Date;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   emergencyContact: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   emergencyPhone: string;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   notes: string;
 
   // Foto profilo (UUID del file, senza FK constraint per flessibilità)
@@ -93,19 +100,19 @@ export class Staff extends IctBaseEntity {
   linkedUserUuid: string;
 
   // Qualifiche e certificazioni
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   drivingLicense: string;
 
   @Column({ type: 'date', nullable: true })
   drivingLicenseExpiry: Date;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   skiInstructorLicense: string;
 
   @Column({ type: 'date', nullable: true })
   skiInstructorLicenseExpiry: Date;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   firstAidCertificate: string;
 
   @Column({ type: 'date', nullable: true })
@@ -142,7 +149,7 @@ export class StaffDocument extends IctBaseEntity {
   @Column({ type: 'enum', enum: StaffDocumentType, default: StaffDocumentType.OTHER })
   documentType: StaffDocumentType;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   description: string;
 
   // Riferimento al file su MinIO (UUID senza FK constraint)

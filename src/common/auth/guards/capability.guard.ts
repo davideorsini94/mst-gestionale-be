@@ -1,6 +1,6 @@
 import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { CAPABILITIES_KEY } from '../decorators/capabilities.decorator';
+import { ANY_CAPABILITIES_KEY, CAPABILITIES_KEY } from '../decorators/capabilities.decorator';
 import { Capability } from '../../models/capabilities-per-role/capability.enum';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
@@ -22,8 +22,14 @@ export class CapabilityGuard implements CanActivate {
       CAPABILITIES_KEY,
       [context.getHandler(), context.getClass()],
     );
+    const anyCapabilities = this.reflector.getAllAndOverride<Capability[]>(
+      ANY_CAPABILITIES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
 
-    if (!requiredCapabilities || requiredCapabilities.length === 0) {
+    const needsAll = !!requiredCapabilities?.length;
+    const needsAny = !!anyCapabilities?.length;
+    if (!needsAll && !needsAny) {
       return true;
     }
 
@@ -38,6 +44,12 @@ export class CapabilityGuard implements CanActivate {
       (cap: any) => cap.capability,
     );
 
-    return requiredCapabilities.every((cap) => userCapabilities.includes(cap));
+    if (needsAll && !requiredCapabilities.every((cap) => userCapabilities.includes(cap))) {
+      return false;
+    }
+    if (needsAny && !anyCapabilities.some((cap) => userCapabilities.includes(cap))) {
+      return false;
+    }
+    return true;
   }
 }

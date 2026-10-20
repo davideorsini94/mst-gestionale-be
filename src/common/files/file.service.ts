@@ -1,4 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
+import * as path from 'path';
 import { Repository } from 'typeorm';
 import { File, FileType } from './entities/file.entity';
 import { MinioService } from '../../minio/minio.service';
@@ -23,8 +25,10 @@ export class FileService {
       throw new Error('File buffer is empty or undefined');
     }
     
-    const sanitizedFilename = this.minioService.sanitizeFilename(file.filename);
-    const minioPath = `${folder}/${Date.now()}-${sanitizedFilename}`;
+    // Nome opaco: il nome originale (spesso con dati personali) resta solo nel DB, cifrato
+    const ext = path.extname(file.filename || '').toLowerCase();
+    const safeExt = /^\.[a-z0-9]{1,8}$/.test(ext) ? ext : '';
+    const minioPath = `${folder}/${randomUUID()}${safeExt}`;
     
     console.log(`[FileService] Uploading to MinIO path: ${minioPath}`);
     

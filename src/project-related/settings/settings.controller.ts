@@ -26,25 +26,29 @@ export class SettingsController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Lista impostazioni' })
+  @ApiOperation({ summary: 'Lista impostazioni (la password SMTP non viene mai restituita)' })
+  @RequireCapabilities(Capability.CAN_VIEW_SETTINGS)
   async findAll() {
-    return this.settingsService.findAll();
+    return this.settingsService.findAllPublic();
   }
 
   @Get(':key')
   @ApiOperation({ summary: 'Dettaglio impostazione' })
+  @RequireCapabilities(Capability.CAN_VIEW_SETTINGS)
   async findOne(@Param('key') key: string) {
-    return this.settingsService.findByKey(key);
+    return this.settingsService.findByKeyPublic(key);
   }
 
   @Post()
-  @ApiOperation({ summary: 'Crea/Aggiorna impostazione' })
+  @ApiOperation({ summary: 'Crea/Aggiorna impostazione (smtpConfig: password vuota = invariata)' })
+  @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
   async upsert(@Body() body: { key: string; value: any; description?: string }) {
     return this.settingsService.upsert(body.key, body.value, body.description);
   }
 
   @Delete(':key')
   @ApiOperation({ summary: 'Elimina impostazione' })
+  @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
   async remove(@Param('key') key: string) {
     return this.settingsService.delete(key);
   }

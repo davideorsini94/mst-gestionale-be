@@ -1,4 +1,5 @@
 import { Entity, Column, OneToMany, ManyToOne, JoinColumn, OneToOne } from 'typeorm';
+import { EncryptedColumn } from '../../../common/crypto/encrypted-column';
 import { IctBaseEntity } from '../../../common/base-crud/ict-base.entity';
 import { Staff } from '../../staff/entities/staff.entity';
 
@@ -21,46 +22,52 @@ export enum MemberStatus {
 
 @Entity('members')
 export class Member extends IctBaseEntity {
-  @Column()
+  @EncryptedColumn()
   firstName: string;
 
-  @Column()
+  @EncryptedColumn()
   lastName: string;
 
   @Column({ type: 'enum', enum: Gender, nullable: true })
   gender: Gender;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true, hash: { property: 'fiscalCodeHash', kind: 'ci' } })
   fiscalCode: string;
 
-  @Column({ type: 'date', nullable: true })
-  birthDate: Date;
+  @Column({ nullable: true, select: false })
+  fiscalCodeHash: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true, date: true })
+  birthDate: string;
+
+  @EncryptedColumn({ nullable: true })
   birthPlace: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   birthProvince: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   nationality: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true, hash: { property: 'emailHash', kind: 'ci' } })
   email: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
+  emailHash: string;
+
+  @EncryptedColumn({ nullable: true })
   phone: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   address: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   city: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   province: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   postalCode: string;
 
   @Column({ type: 'enum', enum: MemberType, default: MemberType.MEMBER })
@@ -74,10 +81,10 @@ export class Member extends IctBaseEntity {
   isCompetitor: boolean;
 
   // Codici federazione
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   fisiCode: string; // Codice FISI (Federazione Italiana Sport Invernali)
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   fisCode: string; // Codice FIS (Federazione Internazionale Sci)
 
   // Visita medica sportiva
@@ -92,13 +99,13 @@ export class Member extends IctBaseEntity {
   profileImageUuid: string;
 
   // Contatto emergenza
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   emergencyContact: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   emergencyPhone: string;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   notes: string;
 
   // Data tesseramento
@@ -134,7 +141,7 @@ export class MemberDocument extends IctBaseEntity {
   @Column({ type: 'enum', enum: MemberDocumentType, default: MemberDocumentType.OTHER })
   documentType: MemberDocumentType;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   description: string;
 
   @Column({ type: 'date', nullable: true })

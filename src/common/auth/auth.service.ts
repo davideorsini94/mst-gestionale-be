@@ -12,8 +12,9 @@ export class AuthService {
   ) { }
 
   async validateUser(username: string, password: string): Promise<User | null> {
-    const user = await this.userService.findByUsername(username);
-    if (user && (await bcrypt.compare(password, user.password))) {
+    const user = await this.userService.findByUsernameWithPassword(username);
+    if (user?.password && (await bcrypt.compare(password, user.password))) {
+      delete user.password;
       return user;
     }
     return null;
@@ -36,6 +37,7 @@ export class AuthService {
         lastName: user.lastName,
         email: user.email,
         role: user.role,
+        preferences: user.preferences ?? {},
       },
     };
   }
@@ -45,8 +47,8 @@ export class AuthService {
     currentPassword: string,
     newPassword: string,
   ): Promise<{ success: boolean; message: string }> {
-    const user = await this.userService.findByUuid(userUuid);
-    if (!user) {
+    const user = await this.userService.findByUuidWithPassword(userUuid);
+    if (!user?.password) {
       throw new BadRequestException('Utente non trovato');
     }
 
@@ -70,8 +72,8 @@ export class AuthService {
     targetUserUuid: string,
     newPassword: string,
   ): Promise<{ success: boolean; message: string }> {
-    const admin = await this.userService.findByUuid(adminUuid);
-    if (!admin) {
+    const admin = await this.userService.findByUuidWithPassword(adminUuid);
+    if (!admin?.password) {
       throw new BadRequestException('Utente admin non trovato');
     }
 

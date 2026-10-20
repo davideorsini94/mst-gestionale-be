@@ -1,22 +1,28 @@
 import { Injectable } from '@nestjs/common';
-import * as XLSX from 'xlsx';
 import { TransactionService } from './transaction.service';
-import { Transaction, TransactionType, PaymentMethod } from './entities/transaction.entity';
+import { AmountReviewStatus, Transaction, TransactionType, PaymentMethod } from './entities/transaction.entity';
 import { CategoryService } from '../categories/category.service';
 import { CategoryType } from '../categories/entities/category.entity';
+import { blindIndex } from '../../common/crypto/field-crypto';
+import {
+  DecimalSeparator,
+  detectDecimalSeparator,
+  legacyStoredAmount,
+  parseAmountCell,
+} from './import/amount-parser';
+import { parseDateCell, readFirstSheet, SheetCell } from './import/sheet-reader';
 
-interface ExcelTransactionRow {
-  [key: string]: any;
-}
+type ExcelRow = Record<string, SheetCell>;
 
-// Mapping flessibile per i nomi delle colonne (alias -> nome standard)
+// Mapping flessibile per i nomi delle colonne (alias -> nome standard), confronto esatto dopo normalizzazione
 const COLUMN_ALIASES: Record<string, string[]> = {
-  data: ['data', 'date', 'data_operazione', 'data operazione', 'dataoperazione', 'data_movimento', 'data movimento'],
+  data: ['data', 'date', 'data_operazione', 'data operazione', 'dataoperazione', 'data_movimento', 'data movimento', 'data contabile', 'data_contabile', 'data valuta', 'data_valuta'],
   tipo: ['tipo', 'type', 'tipologia', 'entrata_uscita', 'entrata/uscita', 'movimento'],
-  importo: ['importo', 'amount', 'valore', 'totale', 'euro', 'eur', 'importo_euro', 'dare', 'avere'],
+  importo: ['importo', 'amount', 'valore', 'totale', 'euro', 'eur', 'importo_euro'],
   importo_originale: ['importo_originale', 'original_amount', 'importo originale', 'uscite/entrate originali'],
-  entrate: ['entrate', 'entrata', 'income', 'incasso', 'incassi', 'credito'],
-  uscite: ['uscite', 'uscita', 'expense', 'spesa', 'spese', 'debito'],
+  // Negli estratti conto "dare" = addebito (uscita), "avere" = accredito (entrata)
+  entrate: ['entrate', 'entrata', 'income', 'incasso', 'incassi', 'credito', 'avere', 'accrediti'],
+  uscite: ['uscite', 'uscita', 'expense', 'spesa', 'spese', 'debito', 'dare', 'addebiti'],
   soggetto: ['soggetto', 'subject', 'cliente', 'fornitore', 'intestatario', 'nominativo', 'nome', 'ditta-ente-soggetto', 'ditta', 'ente', 'ragione sociale'],
   descrizione: ['descrizione', 'description', 'desc', 'causale', 'oggetto', 'motivo'],
   categoria: ['categoria', 'category', 'cat', 'tipo_spesa', 'voce'],
@@ -29,10 +35,31 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   voce_bilancio: ['voce_bilancio', 'voce bilancio', 'budget', 'budget_item', 'cdc', 'centro_costo'],
 };
 
+const AMOUNT_COLUMNS = ['importo', 'importo_originale', 'entrate', 'uscite'];
+const PAYMENT_METHOD_WORDS = ['BANCA', 'CONTANTI', 'ASSEGNO', 'CARTA', 'BONIFICO', 'CASH', 'CHECK'];
+
 export interface ImportResult {
   imported: number;
   updated: number;
+  /** Righe già presenti con l'importo rovinato dal vecchio import: corrette con il valore del file */
+  corrected: number;
   errors: { row: number; error: string }[];
+}
+
+interface ParsedRow {
+  rowNumber: number;
+  transaction: Partial<Transaction>;
+  /** Importo che il vecchio parser v1.3 avrebbe salvato per questa riga */
+  legacyAmount: number | null;
+}
+
+function normalizeHeader(value: unknown): string {
+  return String(value ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+const ALIAS_TO_KEY = new Map<string, string>();
+for (const [key, aliases] of Object.entries(COLUMN_ALIASES)) {
+  for (const alias of aliases) ALIAS_TO_KEY.set(alias, key);
 }
 
 @Injectable()
@@ -42,295 +69,244 @@ export class ExcelImportService {
     private readonly categoryService: CategoryService,
   ) { }
 
-  async importFromFile(buffer: Buffer, filename?: string): Promise<ImportResult> {
-    // xlsx supporta sia Excel (.xlsx, .xls) che CSV nativamente
-    const isCsv = filename?.toLowerCase().endsWith('.csv');
-    const workbook = XLSX.read(buffer, {
-      type: 'buffer',
-      codepage: isCsv ? 65001 : undefined, // UTF-8 per CSV
-    });
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
+  async importFromFile(buffer: Buffer, _filename?: string): Promise<ImportResult> {
+    const { rows: allRows, date1904 } = readFirstSheet(buffer);
+    const result: ImportResult = { imported: 0, updated: 0, corrected: 0, errors: [] };
 
-    // Leggi tutte le righe come array di array per gestire header non in prima riga
-    const allRows: any[][] = XLSX.utils.sheet_to_json(worksheet, {
-      header: 1,
-      raw: false,
-      defval: null,
-    });
+    const headerRowIndex = this.findHeaderRow(allRows);
+    const headerKeys = (allRows[headerRowIndex] ?? []).map((cell) =>
+      cell ? ALIAS_TO_KEY.get(normalizeHeader(cell.w ?? cell.v)) ?? normalizeHeader(cell.w ?? cell.v) : null,
+    );
 
-    // Trova la riga header (cerca la prima riga con contenuto significativo)
-    let headerRowIndex = 0;
-    for (let i = 0; i < Math.min(10, allRows.length); i++) {
-      const row = allRows[i];
-      if (row && row.some((cell: any) => cell && String(cell).trim().length > 0)) {
-        // Verifica se questa riga sembra un header (contiene parole chiave)
-        const rowStr = row.map((c: any) => String(c || '').toLowerCase()).join(' ');
-        if (rowStr.includes('data') || rowStr.includes('date') ||
-          rowStr.includes('importo') || rowStr.includes('tipo') ||
-          rowStr.includes('descrizione') || rowStr.includes('causale')) {
-          headerRowIndex = i;
-          break;
-        }
-      }
-    }
-
-    // Estrai header
-    const headers = allRows[headerRowIndex]?.map((h: any) => String(h || '').trim()) || [];
-
-    // Converti le righe successive in oggetti
-    const rows: ExcelTransactionRow[] = [];
+    const rows: { row: ExcelRow; rowNumber: number }[] = [];
     for (let i = headerRowIndex + 1; i < allRows.length; i++) {
-      const rowData = allRows[i];
-      if (!rowData || rowData.length === 0) continue;
-
-      const obj: ExcelTransactionRow = {};
-      for (let j = 0; j < headers.length; j++) {
-        if (headers[j] && rowData[j] !== undefined && rowData[j] !== null) {
-          obj[headers[j]] = rowData[j];
-        }
-      }
-      rows.push(obj);
+      const row: ExcelRow = {};
+      allRows[i].forEach((cell, j) => {
+        const key = headerKeys[j];
+        if (key && cell && !(key in row)) row[key] = cell;
+      });
+      if (this.hasValidData(row)) rows.push({ row, rowNumber: i + 1 });
     }
 
-    const result: ImportResult = {
-      imported: 0,
-      updated: 0,
-      errors: [],
-    };
+    // Separatore decimale di ogni colonna importo dedotto dai valori non ambigui (risolve "1.234" vs "1,234")
+    const decimalHints: Record<string, DecimalSeparator | undefined> = {};
+    for (const col of AMOUNT_COLUMNS) {
+      const texts = rows.map((r) => r.row[col]).filter((c) => c && c.t === 's').map((c) => String(c.v));
+      decimalHints[col] = detectDecimalSeparator(texts);
+    }
 
-    // Prepara le righe con i loro indici originali e normalizza
-    const processedRows: { row: ExcelTransactionRow; originalIndex: number; date: Date | null }[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = this.normalizeRow(rows[i]);
-
-      // Salta righe vuote
-      if (Object.keys(row).length === 0 || !this.hasValidData(row)) {
-        continue;
-      }
-
-      // Prova a parsare la data per l'ordinamento
-      let date: Date | null = null;
+    const parsed: ParsedRow[] = [];
+    for (const { row, rowNumber } of rows) {
       try {
-        if (row.data) {
-          date = this.parseDate(row.data);
-        }
-      } catch {
-        // Se la data non è valida, verrà gestita durante l'import
+        const { transaction, legacyAmount } = await this.rowToTransaction(row, date1904, decimalHints);
+        parsed.push({ rowNumber, transaction, legacyAmount });
+      } catch (error) {
+        result.errors.push({ row: rowNumber, error: error.message || 'Errore sconosciuto' });
       }
-
-      processedRows.push({
-        row,
-        originalIndex: i,
-        date,
-      });
     }
 
     // Inverti l'ordine delle righe: le righe dal basso dell'Excel vengono inserite prima
     // così le righe in alto avranno created_at più recente
-    processedRows.reverse();
+    parsed.reverse();
 
-    // Processa le righe in ordine inverso (dal basso verso l'alto dell'Excel)
-    for (const { row, originalIndex } of processedRows) {
-      const rowNumber = headerRowIndex + originalIndex + 2; // +2 perché Excel parte da 1 e aggiungiamo l'header
-
+    // Righe identiche nello stesso file sono movimenti distinti: la k-esima occorrenza si abbina alla k-esima
+    // riga esistente, mai la stessa riga due volte
+    const usedUuids = new Set<string>();
+    for (const item of parsed) {
       try {
-        const transaction = await this.rowToTransaction(row);
-
-        // Cerca transazione esistente per data, importo e soggetto
-        const existing = await this.findExistingTransaction(transaction);
-
-        if (existing) {
-          // Aggiorna transazione esistente
-          await this.transactionService.update(existing.uuid, transaction as any);
-          result.updated++;
-        } else {
-          // Crea nuova transazione
-          await this.transactionService.createTransaction(transaction as any);
-          result.imported++;
-        }
+        const outcome = await this.upsert(item, usedUuids);
+        result[outcome]++;
       } catch (error) {
-        result.errors.push({
-          row: rowNumber,
-          error: error.message || 'Errore sconosciuto',
-        });
+        result.errors.push({ row: item.rowNumber, error: error.message || 'Errore sconosciuto' });
       }
     }
 
+    result.errors.sort((a, b) => a.row - b.row);
     return result;
   }
 
-  private async rowToTransaction(row: ExcelTransactionRow): Promise<Partial<Transaction>> {
+  private findHeaderRow(rows: (SheetCell | null)[][]): number {
+    // 1) la prima riga con almeno due intestazioni riconosciute esattamente
+    for (let i = 0; i < Math.min(10, rows.length); i++) {
+      const known = rows[i].filter((c) => c && ALIAS_TO_KEY.has(normalizeHeader(c.w ?? c.v))).length;
+      if (known >= 2) return i;
+    }
+    // 2) compatibilità con i file importati finora: prima riga che contiene parole chiave
+    for (let i = 0; i < Math.min(10, rows.length); i++) {
+      const rowStr = rows[i].map((c) => normalizeHeader(c?.w ?? c?.v)).join(' ');
+      if (['data', 'date', 'importo', 'tipo', 'descrizione', 'causale'].some((k) => rowStr.includes(k))) return i;
+    }
+    return 0;
+  }
+
+  private async upsert(item: ParsedRow, usedUuids: Set<string>): Promise<'imported' | 'updated' | 'corrected'> {
+    const tx = item.transaction;
+    const subjectHash = blindIndex(tx.subject ?? null, 'exact');
+
+    let existing = await this.findCandidate(tx, tx.amount, subjectHash, usedUuids, false);
+    let isLegacyMatch = false;
+    if (!existing && item.legacyAmount !== null && item.legacyAmount !== tx.amount) {
+      existing = await this.findCandidate(tx, item.legacyAmount, subjectHash, usedUuids, true);
+      isLegacyMatch = !!existing;
+    }
+
+    if (!existing) {
+      const created = await this.transactionService.createTransaction(tx as any);
+      // una riga identica più avanti nello stesso file è un altro movimento: non deve abbinarsi a questa
+      usedUuids.add(created.uuid);
+      return 'imported';
+    }
+    usedUuids.add(existing.uuid);
+
+    const update: Partial<Transaction> = { ...tx };
+    const amountChanged = Number(existing.amount) !== Number(tx.amount);
+    if (isLegacyMatch && amountChanged) {
+      // Importo rovinato dal vecchio import: si conserva il valore precedente per l'annullamento
+      update.amountReview = AmountReviewStatus.CORRECTED;
+      update.amountBeforeReview = existing.amountBeforeReview ?? existing.amount;
+      update.originalAmountBeforeReview = existing.originalAmountBeforeReview ?? existing.originalAmount;
+      update.amountReviewedAt = new Date();
+    }
+
+    if (tx.type === TransactionType.INCOME && amountChanged) {
+      // La ricevuta riporta l'importo: va rigenerata (stesso numero)
+      await this.transactionService.updateTransaction(existing.uuid, update as any);
+    } else {
+      await this.transactionService.update(existing.uuid, update as any);
+    }
+    return isLegacyMatch ? 'corrected' : 'updated';
+  }
+
+  /** Cerca per data + tipo + importo + soggetto (blind index) la prima riga non ancora abbinata. */
+  private async findCandidate(
+    tx: Partial<Transaction>,
+    amount: number,
+    subjectHash: string | null,
+    usedUuids: Set<string>,
+    includeReviewed: boolean,
+  ): Promise<Transaction | null> {
+    const qb = this.transactionService.getQueryBuilder('t')
+      .addSelect('t.subjectHash')
+      .where('t.date = :date', { date: tx.date })
+      .andWhere('t.type = :type', { type: tx.type });
+
+    if (includeReviewed) {
+      // valore salvato dal vecchio parser, anche se nel frattempo corretto a mano dalla revisione importi
+      qb.andWhere('(t.amount = :amount OR t.amountBeforeReview = :amount)', { amount });
+    } else {
+      qb.andWhere('t.amount = :amount', { amount });
+    }
+    if (subjectHash) {
+      qb.andWhere('t.subjectHash = :subjectHash', { subjectHash });
+    } else {
+      qb.andWhere('t.subjectHash IS NULL');
+    }
+    if (usedUuids.size) {
+      qb.andWhere('t.uuid NOT IN (:...used)', { used: Array.from(usedUuids) });
+    }
+    return qb.orderBy('t.createdAt', 'ASC').getOne();
+  }
+
+  private cellText(cell: SheetCell | undefined): string | undefined {
+    if (!cell) return undefined;
+    // per codici e riferimenti si usa il testo mostrato da Excel (conserva gli zeri iniziali)
+    const text = cell.t === 'n' && cell.w !== undefined ? cell.w : String(cell.v);
+    const trimmed = text.trim();
+    return trimmed === '' ? undefined : trimmed;
+  }
+
+  private isZeroOrEmpty(cell: SheetCell | undefined, hint?: DecimalSeparator): boolean {
+    if (!cell) return true;
+    if (typeof cell.v === 'number') return cell.v === 0;
+    const text = String(cell.v).trim();
+    // zero in formato contabile: "-", "€ -", "- €"
+    if (/^[€\s -]*$/.test(text)) return true;
+    try {
+      return parseAmountCell(cell.v, hint) === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private async rowToTransaction(
+    row: ExcelRow,
+    date1904: boolean,
+    hints: Record<string, DecimalSeparator | undefined>,
+  ): Promise<{ transaction: Partial<Transaction>; legacyAmount: number | null }> {
     const transaction: Partial<Transaction> = {};
 
     // Data
-    if (row.data) {
-      transaction.date = this.parseDate(row.data);
-    } else {
-      throw new Error('Data mancante');
-    }
+    if (!row.data) throw new Error('Data mancante');
+    transaction.date = parseDateCell(row.data.v, date1904) as any;
 
-    // Importo e Tipo - gestisce sia colonna singola che colonne separate entrate/uscite
+    // Importo e Tipo - gestisce sia colonna singola che colonne separate entrate/uscite (0 = vuoto)
+    let amountCell: SheetCell | undefined;
     let importoValue: number | null = null;
-
-    // Caso 1: Colonne separate per entrate e uscite
-    if (row.entrate !== undefined && row.entrate !== null && row.entrate !== '') {
-      importoValue = this.parseNumber(row.entrate);
-      transaction.amount = Math.abs(importoValue);
+    if (!this.isZeroOrEmpty(row.entrate, hints.entrate)) {
+      amountCell = row.entrate;
+      importoValue = parseAmountCell(row.entrate.v, hints.entrate);
       transaction.type = TransactionType.INCOME;
-    } else if (row.uscite !== undefined && row.uscite !== null && row.uscite !== '') {
-      importoValue = this.parseNumber(row.uscite);
-      transaction.amount = Math.abs(importoValue);
+    } else if (!this.isZeroOrEmpty(row.uscite, hints.uscite)) {
+      amountCell = row.uscite;
+      importoValue = parseAmountCell(row.uscite.v, hints.uscite);
       transaction.type = TransactionType.EXPENSE;
-    }
-    // Caso 2: Colonna singola importo
-    else if (row.importo !== undefined && row.importo !== null && row.importo !== '') {
-      importoValue = this.parseNumber(row.importo);
-      transaction.amount = Math.abs(importoValue);
-      // Il tipo verrà determinato sotto
+    } else if (row.importo) {
+      amountCell = row.importo;
+      importoValue = parseAmountCell(row.importo.v, hints.importo);
     }
 
-    if (importoValue === null || transaction.amount === undefined) {
+    if (importoValue === null) {
       throw new Error('Importo mancante');
     }
+    transaction.amount = Math.abs(importoValue);
+
+    const tipo = this.cellText(row.tipo);
+    const tipoUpper = tipo?.toUpperCase();
 
     // Se il tipo non è già stato determinato dalle colonne entrate/uscite
     if (!transaction.type) {
-      if (row.tipo) {
-        const tipoUpper = String(row.tipo).toUpperCase().trim();
-
-        // Verifica se è un tipo di transazione esplicito
-        if (tipoUpper === 'ENTRATA' || tipoUpper === 'INCOME' || tipoUpper === 'E' || tipoUpper === '+') {
-          transaction.type = TransactionType.INCOME;
-        } else if (tipoUpper === 'USCITA' || tipoUpper === 'EXPENSE' || tipoUpper === 'U' || tipoUpper === '-') {
-          transaction.type = TransactionType.EXPENSE;
-        } else if (['BANCA', 'CONTANTI', 'ASSEGNO', 'CARTA', 'BONIFICO', 'CASH', 'CHECK'].includes(tipoUpper)) {
-          // È un metodo di pagamento, non un tipo - determina dal segno dell'importo
-          transaction.paymentMethod = this.parsePaymentMethod(row.tipo);
-          transaction.type = importoValue >= 0 ? TransactionType.INCOME : TransactionType.EXPENSE;
-        } else {
-          // Prova a determinare dal segno dell'importo
-          transaction.type = importoValue >= 0 ? TransactionType.INCOME : TransactionType.EXPENSE;
-        }
+      if (tipoUpper === 'ENTRATA' || tipoUpper === 'INCOME' || tipoUpper === 'E' || tipoUpper === '+') {
+        transaction.type = TransactionType.INCOME;
+      } else if (tipoUpper === 'USCITA' || tipoUpper === 'EXPENSE' || tipoUpper === 'U' || tipoUpper === '-') {
+        transaction.type = TransactionType.EXPENSE;
       } else {
-        // Nessuna colonna tipo - determina dal segno dell'importo
+        // Determina dal segno dell'importo (anche quando "tipo" è un metodo di pagamento)
         transaction.type = importoValue >= 0 ? TransactionType.INCOME : TransactionType.EXPENSE;
       }
     }
 
-    // Se abbiamo la colonna tipo ma il tipo è già stato determinato, usa tipo come metodo pagamento
-    if (transaction.type && row.tipo && !transaction.paymentMethod) {
-      const tipoUpper = String(row.tipo).toUpperCase().trim();
-      if (['BANCA', 'CONTANTI', 'ASSEGNO', 'CARTA', 'BONIFICO', 'CASH', 'CHECK'].includes(tipoUpper)) {
-        transaction.paymentMethod = this.parsePaymentMethod(row.tipo);
-      }
+    // La colonna tipo può contenere il metodo di pagamento
+    if (tipoUpper && PAYMENT_METHOD_WORDS.includes(tipoUpper)) {
+      transaction.paymentMethod = this.parsePaymentMethod(tipo);
     }
 
     // Importo originale (opzionale)
-    if (row.importo_originale !== undefined && row.importo_originale !== null) {
-      transaction.originalAmount = this.parseNumber(row.importo_originale);
+    if (row.importo_originale && !this.isZeroOrEmpty(row.importo_originale, hints.importo_originale)) {
+      transaction.originalAmount = parseAmountCell(row.importo_originale.v, hints.importo_originale);
     }
 
-    // Soggetto
-    if (row.soggetto) {
-      transaction.subject = String(row.soggetto).trim();
-    }
-
-    // Descrizione
-    if (row.descrizione) {
-      transaction.description = String(row.descrizione).trim();
-    }
+    const text = (key: string) => this.cellText(row[key]);
+    if (text('soggetto')) transaction.subject = text('soggetto');
+    if (text('descrizione')) transaction.description = text('descrizione');
 
     // Categoria - trova o crea
-    if (row.categoria) {
-      const categoryName = String(row.categoria).trim();
-      const category = await this.categoryService.findOrCreateByName(categoryName, CategoryType.BOTH);
+    if (text('categoria')) {
+      const category = await this.categoryService.findOrCreateByName(text('categoria'), CategoryType.BOTH);
       transaction.categoryUuid = category.uuid;
     }
 
-    // Metodo di pagamento
-    if (row.metodo_pagamento) {
-      transaction.paymentMethod = this.parsePaymentMethod(row.metodo_pagamento);
-    }
+    if (text('metodo_pagamento')) transaction.paymentMethod = this.parsePaymentMethod(text('metodo_pagamento'));
+    if (text('riferimento')) transaction.reference = text('riferimento');
+    if (text('numero_fattura')) transaction.invoiceNumber = text('numero_fattura');
+    if (text('controparte')) transaction.counterpart = text('controparte');
+    if (text('note')) transaction.notes = text('note');
+    if (text('note2')) transaction.notes2 = text('note2');
+    if (text('voce_bilancio')) transaction.budgetItem = text('voce_bilancio');
 
-    // Riferimento
-    if (row.riferimento) {
-      transaction.reference = String(row.riferimento).trim();
-    }
-
-    // Numero fattura
-    if (row.numero_fattura) {
-      transaction.invoiceNumber = String(row.numero_fattura).trim();
-    }
-
-    // Controparte
-    if (row.controparte) {
-      transaction.counterpart = String(row.controparte).trim();
-    }
-
-    // Note
-    if (row.note) {
-      transaction.notes = String(row.note).trim();
-    }
-
-    // Note2
-    if (row.note2) {
-      transaction.notes2 = String(row.note2).trim();
-    }
-
-    // Voce bilancio
-    if (row.voce_bilancio) {
-      transaction.budgetItem = String(row.voce_bilancio).trim();
-    }
-
-    return transaction;
-  }
-
-  private parseDate(value: string | number): Date {
-    if (typeof value === 'number') {
-      // Excel serial date
-      const date = XLSX.SSF.parse_date_code(value);
-      return new Date(date.y, date.m - 1, date.d);
-    }
-
-    const str = String(value).trim();
-
-    // Prova diversi formati di data
-    // DD/MM/YYYY
-    let match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (match) {
-      return new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
-    }
-
-    // YYYY-MM-DD
-    match = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-    if (match) {
-      return new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
-    }
-
-    // Prova parsing nativo
-    const parsed = new Date(str);
-    if (!isNaN(parsed.getTime())) {
-      return parsed;
-    }
-
-    throw new Error(`Formato data non valido: ${value}`);
-  }
-
-  private parseNumber(value: any): number {
-    if (typeof value === 'number') {
-      return value;
-    }
-
-    const str = String(value).trim().replace(',', '.').replace(/[€\s]/g, '');
-    const num = parseFloat(str);
-
-    if (isNaN(num)) {
-      throw new Error(`Numero non valido: ${value}`);
-    }
-
-    return num;
+    return {
+      transaction,
+      legacyAmount: amountCell ? legacyStoredAmount(amountCell.w ?? amountCell.v, amountCell.v) : null,
+    };
   }
 
   private parsePaymentMethod(value: string): PaymentMethod {
@@ -359,58 +335,11 @@ export class ExcelImportService {
     return mapping[normalized] || PaymentMethod.OTHER;
   }
 
-  private async findExistingTransaction(transaction: Partial<Transaction>): Promise<Transaction | null> {
-    // Cerca per data + importo + soggetto (chiave univoca logica)
-    const queryBuilder = this.transactionService.getQueryBuilder('t');
-
-    queryBuilder.where('t.date = :date', { date: transaction.date });
-    queryBuilder.andWhere('t.amount = :amount', { amount: transaction.amount });
-    queryBuilder.andWhere('t.type = :type', { type: transaction.type });
-
-    if (transaction.subject) {
-      queryBuilder.andWhere('t.subject = :subject', { subject: transaction.subject });
-    } else {
-      queryBuilder.andWhere('t.subject IS NULL');
-    }
-
-    return queryBuilder.getOne();
-  }
-
-  /**
-   * Normalizza una riga mappando i nomi delle colonne agli alias standard
-   */
-  private normalizeRow(row: ExcelTransactionRow): ExcelTransactionRow {
-    const normalized: ExcelTransactionRow = {};
-
-    for (const [originalKey, value] of Object.entries(row)) {
-      if (value === null || value === undefined || value === '') continue;
-
-      const normalizedKey = originalKey.toLowerCase().trim();
-
-      // Cerca se questa chiave corrisponde a un alias
-      let mappedKey: string | null = null;
-      for (const [standardKey, aliases] of Object.entries(COLUMN_ALIASES)) {
-        if (aliases.includes(normalizedKey)) {
-          mappedKey = standardKey;
-          break;
-        }
-      }
-
-      // Usa la chiave mappata o quella originale normalizzata
-      const finalKey = mappedKey || normalizedKey;
-      normalized[finalKey] = value;
-    }
-
-    return normalized;
-  }
-
   /**
    * Verifica se una riga ha dati validi (almeno data o importo)
    */
-  private hasValidData(row: ExcelTransactionRow): boolean {
-    // Una riga è valida se ha almeno una data o un importo
-    const hasData = row.data !== undefined && row.data !== null && row.data !== '';
-    const hasImporto = row.importo !== undefined && row.importo !== null && row.importo !== '';
-    return hasData || hasImporto;
+  private hasValidData(row: ExcelRow): boolean {
+    // Come nella v1.3: le righe senza data né importo (es. totali con sole entrate/uscite) vengono saltate
+    return !!(row.data || row.importo);
   }
 }
