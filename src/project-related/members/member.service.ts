@@ -11,7 +11,7 @@ import { ReminderService } from '../reminders/reminder.service';
 export interface HotelBookingEntry {
   firstName: string;
   lastName: string;
-  birthDate: Date;
+  birthDate: string;
   birthPlace: string;
   gender: Gender;
 }
@@ -78,7 +78,8 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
   }
 
   async findCompetitors(): Promise<Member[]> {
-    return this.repo.find({
+    // L'ordinamento per nome passa da BaseService.find (in memoria: i nomi sono cifrati)
+    return this.find({
       where: { isCompetitor: true, memberType: MemberType.ATHLETE },
       order: { lastName: 'ASC', firstName: 'ASC' },
     });

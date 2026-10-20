@@ -10,6 +10,7 @@ import {
   Req,
   Res,
   StreamableFile,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { StaffService } from './staff.service';
@@ -30,6 +31,30 @@ export class StaffController {
     private readonly fileService: FileService,
   ) {}
 
+  private hasCapability(req: FastifyRequest, capability: Capability): boolean {
+    const caps = (req as any).user?.role?.capabilities ?? [];
+    return caps.some((c: any) => c.capability === capability);
+  }
+
+  /** Lo staff collegato all'utente (per linkedUserUuid, poi per email). */
+  private async findOwnStaff(req: FastifyRequest) {
+    const user = (req as any).user;
+    let staffMember = await this.staffService.findByLinkedUserUuid(user.uuid);
+    if (!staffMember && user.email) {
+      staffMember = await this.staffService.findByEmail(user.email);
+    }
+    return staffMember;
+  }
+
+  /** Consentito con la capability oppure sul proprio profilo staff. */
+  private async assertStaffAccess(req: FastifyRequest, staffUuid: string, capability: Capability): Promise<void> {
+    if (this.hasCapability(req, capability)) return;
+    const own = await this.findOwnStaff(req);
+    if (own?.uuid !== staffUuid) {
+      throw new ForbiddenException('Operazione non consentita');
+    }
+  }
+
   @Get()
   @ApiOperation({ summary: 'Lista staff' })
   @RequireCapabilities(Capability.CAN_VIEW_STAFF)
@@ -41,12 +66,8 @@ export class StaffController {
   @Get('me')
   @ApiOperation({ summary: 'Ottieni il proprio profilo staff' })
   async getMyProfile(@Req() req: FastifyRequest) {
-    const user = (req as any).user;
     // Prima cerca per linkedUserUuid, poi per email come fallback
-    let staffMember = await this.staffService.findByLinkedUserUuid(user.uuid);
-    if (!staffMember && user.email) {
-      staffMember = await this.staffService.findByEmail(user.email);
-    }
+    const staffMember = await this.findOwnStaff(req);
     if (!staffMember) {
       return { found: false, message: 'Profilo staff non collegato a questo utente' };
     }
@@ -64,8 +85,10 @@ export class StaffController {
   @ApiOperation({ summary: 'Ottieni immagine profilo' })
   async getProfileImage(
     @Param('uuid') uuid: string,
+    @Req() req: FastifyRequest,
     @Res({ passthrough: true }) res: FastifyReply,
   ) {
+    await this.assertStaffAccess(req, uuid, Capability.CAN_VIEW_STAFF);
     const staff = await this.staffService.findByUuidWithDocuments(uuid);
     if (!staff.profileImageUuid) {
       res.status(404);
@@ -88,12 +111,8 @@ export class StaffController {
   @Put('me')
   @ApiOperation({ summary: 'Aggiorna il proprio profilo staff' })
   async updateMyProfile(@Req() req: FastifyRequest, @Body() updateStaffDto: UpdateStaffDto) {
-    const user = (req as any).user;
     // Prima cerca per linkedUserUuid, poi per email come fallback
-    let staffMember = await this.staffService.findByLinkedUserUuid(user.uuid);
-    if (!staffMember && user.email) {
-      staffMember = await this.staffService.findByEmail(user.email);
-    }
+    const staffMember = await this.findOwnStaff(req);
     if (!staffMember) {
       throw new Error('Profilo staff non trovato per questo utente');
     }
@@ -127,6 +146,7 @@ export class StaffController {
     },
   })
   async uploadProfileImage(@Param('uuid') uuid: string, @Req() req: FastifyRequest) {
+    await this.assertStaffAccess(req, uuid, Capability.CAN_MANAGE_STAFF);
     const body = req.body as any;
     const file = body.file;
     
@@ -145,7 +165,8 @@ export class StaffController {
   // Elimina foto profilo
   @Delete(':uuid/profile-image')
   @ApiOperation({ summary: 'Elimina foto profilo staff' })
-  async deleteProfileImage(@Param('uuid') uuid: string) {
+  async deleteProfileImage(@Param('uuid') uuid: string, @Req() req: FastifyRequest) {
+    await this.assertStaffAccess(req, uuid, Capability.CAN_MANAGE_STAFF);
     return this.staffService.deleteProfileImage(uuid);
   }
 
@@ -167,6 +188,7 @@ export class StaffController {
     @Param('uuid') uuid: string,
     @Req() req: FastifyRequest,
   ) {
+    await this.assertStaffAccess(req, uuid, Capability.CAN_MANAGE_STAFF);
     const body = req.body as any;
     const file = body.file;
     
@@ -189,7 +211,8 @@ export class StaffController {
   // Lista documenti
   @Get(':uuid/documents')
   @ApiOperation({ summary: 'Lista documenti staff' })
-  async getDocuments(@Param('uuid') uuid: string) {
+  async getDocuments(@Param('uuid') uuid: string, @Req() req: FastifyRequest) {
+    await this.assertStaffAccess(req, uuid, Capability.CAN_VIEW_STAFF);
     return this.staffService.getDocuments(uuid);
   }
 
@@ -209,7 +232,9 @@ export class StaffController {
   // Elimina documento
   @Delete('documents/:documentUuid')
   @ApiOperation({ summary: 'Elimina documento' })
-  async deleteDocument(@Param('documentUuid') documentUuid: string) {
+  async deleteDocument(@Param('documentUuid') documentUuid: string, @Req() req: FastifyRequest) {
+    const staffUuid = await this.staffService.getDocumentStaffUuid(documentUuid);
+    await this.assertStaffAccess(req, staffUuid, Capability.CAN_MANAGE_STAFF);
     await this.staffService.deleteDocument(documentUuid);
     return { success: true };
   }

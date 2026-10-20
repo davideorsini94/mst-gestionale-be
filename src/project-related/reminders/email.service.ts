@@ -32,11 +32,8 @@ export class EmailService {
   ) { }
 
   private async getSmtpConfig(): Promise<SmtpConfig | null> {
-    const setting = await this.settingsService.findByKey('smtpConfig');
-    if (setting?.value) {
-      return setting.value as SmtpConfig;
-    }
-    return null;
+    // Password SMTP salvata cifrata: getSmtpConfig la restituisce in chiaro solo per l'invio
+    return (await this.settingsService.getSmtpConfig()) as SmtpConfig | null;
   }
 
   private async createTransporter(): Promise<nodemailer.Transporter | null> {

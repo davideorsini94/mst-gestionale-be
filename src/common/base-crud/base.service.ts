@@ -28,6 +28,14 @@ import {
   RecursivePartial,
 } from './base.filter';
 import { dataSource } from '../../datasources/data-source';
+import { getEncryptedFields } from '../crypto/encrypted-column';
+import {
+  applyMemoryFilters,
+  assertNoEncryptedWhere,
+  planEncryptedQuery,
+  sortRows,
+  splitOrder,
+} from './encrypted-query';
 
 export class CustomRequestContext {
   user?: any;
@@ -219,8 +227,66 @@ export abstract class BaseService<
     filters: string,
     context: CustomRequestContext,
   ): Promise<[T[], number]> {
-    const options = this.filtersStringToOptions(filters);
-    return this.findAndCount(options, context);
+    const filterList = this.filterStringToFilterList(filters);
+    const plan = planEncryptedQuery(
+      this.entityTarget,
+      filterList,
+      this.getDefaultOrder() as Record<string, any>,
+      (relation) => this.relationTarget(relation),
+    );
+    if (!plan) {
+      const options = filters ? this.filterListToFindManyOption(filterList) : null;
+      return this.findAndCount(options, context);
+    }
+    return this.findAndCountInMemory(filterList, plan, context);
+  }
+
+  /**
+   * Filtri/ordinamenti su campi cifrati: 1) SQL con i soli filtri in chiaro, leggendo uuid e colonne coinvolte;
+   * 2) decifratura, filtro, ordinamento e conteggio in memoria; 3) caricamento completo della sola pagina richiesta.
+   */
+  private async findAndCountInMemory(
+    filterList: BaseFilterList<T>,
+    plan: ReturnType<typeof planEncryptedQuery>,
+    context: CustomRequestContext,
+  ): Promise<[T[], number]> {
+    const dbOptions = this.filterListToFindManyOption(plan.dbFilterList) ?? {};
+    const manager = context?.queryRunner ? context.queryRunner.manager : this.repo.manager;
+    const columnNames = new Set(this.repo.metadata.columns.map((c) => c.propertyName));
+
+    assertNoEncryptedWhere(this.entityTarget, dbOptions.where, (r) => this.relationTarget(r));
+    const candidates: T[] = await manager.find(this.entityTarget, {
+      where: dbOptions.where,
+      relations: dbOptions.relations,
+      select: plan.columns.filter((c) => columnNames.has(c)) as any,
+    });
+
+    const filtered = sortRows(applyMemoryFilters(candidates as any[], plan), plan.order);
+    const total = filtered.length;
+
+    let pageRows = filtered;
+    if (filterList.pageSize) {
+      const { take, skip } = this.paginationToTakeSkip({ page: filterList.page, pageSize: filterList.pageSize });
+      pageRows = filtered.slice(skip, skip + take);
+    }
+    if (!pageRows.length) {
+      return [[], total];
+    }
+
+    const uuids = pageRows.map((r: any) => r.uuid);
+    const loaded = await this.find(
+      { where: { uuid: In(uuids) } as FindOptionsWhere<T>, relations: dbOptions.relations, order: undefined },
+      context,
+    );
+    const byUuid = new Map(loaded.map((e) => [e.uuid, e]));
+    return [uuids.map((u) => byUuid.get(u)).filter(Boolean), total];
+  }
+
+  /** Entità collegata a una relazione (per controllare i campi cifrati nei filtri annidati). */
+  protected relationTarget(relation: string): Function | null {
+    const rel = this.repo.metadata.relations.find((r) => r.propertyName === relation);
+    const type = rel?.inverseEntityMetadata?.target;
+    return typeof type === 'function' ? type : null;
   }
 
   async find(
@@ -229,12 +295,12 @@ export abstract class BaseService<
   ): Promise<T[]> {
     options = this.setOrderIfMissing(options);
     options = this.setRelationsIfMissing(options, context);
+    const { options: dbOptions, memoryOrder } = this.prepareOptions(options);
 
-    if (context?.queryRunner) {
-      return context.queryRunner.manager.find(this.entityTarget, options);
-    }
-
-    return this.repo.find(options);
+    const rows: T[] = context?.queryRunner
+      ? await context.queryRunner.manager.find(this.entityTarget, dbOptions)
+      : await this.repo.find(dbOptions);
+    return memoryOrder ? sortRows(rows as any[], memoryOrder) : rows;
   }
 
   async findAndCount(
@@ -243,12 +309,42 @@ export abstract class BaseService<
   ): Promise<[T[], number]> {
     options = this.setOrderIfMissing(options);
     options = this.setRelationsIfMissing(options, context);
+    const { options: dbOptions, memoryOrder } = this.prepareOptions(options);
 
-    if (context?.queryRunner) {
-      return context.queryRunner.manager.findAndCount(this.entityTarget, options);
+    if (!memoryOrder) {
+      if (context?.queryRunner) {
+        return context.queryRunner.manager.findAndCount(this.entityTarget, dbOptions);
+      }
+      return this.repo.findAndCount(dbOptions);
     }
 
-    return this.repo.findAndCount(options);
+    // Ordinamento su campi cifrati: si ordina in memoria e poi si pagina
+    const { take, skip, ...rest } = dbOptions;
+    const all: T[] = context?.queryRunner
+      ? await context.queryRunner.manager.find(this.entityTarget, rest)
+      : await this.repo.find(rest);
+    const sorted = sortRows(all as any[], memoryOrder);
+    const start = skip ?? 0;
+    return [take ? sorted.slice(start, start + take) : sorted.slice(start), sorted.length];
+  }
+
+  /**
+   * Controlla che nessun campo cifrato finisca in una condizione SQL e sposta in memoria gli ordinamenti
+   * su campi cifrati (nel DB c'è testo casuale).
+   */
+  protected prepareOptions<O extends FindManyOptions<T> | FindOneOptions<T>>(options: O) {
+    if (!options) return { options, memoryOrder: null };
+    assertNoEncryptedWhere(this.entityTarget, options.where, (r) => this.relationTarget(r));
+    const { dbOrder, memoryOrder } = splitOrder(
+      this.entityTarget,
+      options.order as Record<string, any>,
+      (r) => this.relationTarget(r),
+    );
+    return { options: { ...options, order: dbOrder } as O, memoryOrder };
+  }
+
+  async count(): Promise<number> {
+    return this.repo.count();
   }
 
   async findByUuid(
@@ -283,12 +379,13 @@ export abstract class BaseService<
   ): Promise<T> {
     options = this.setOrderIfMissing(options);
     options = this.setRelationsIfMissing(options, context);
+    const { options: dbOptions } = this.prepareOptions(options);
 
     if (context?.queryRunner) {
-      return context.queryRunner.manager.findOne(this.entityTarget, options);
+      return context.queryRunner.manager.findOne(this.entityTarget, dbOptions);
     }
 
-    return this.repo.findOne(options);
+    return this.repo.findOne(dbOptions);
   }
 
   async create(dto: C, context?: CustomRequestContext): Promise<T> {
@@ -300,11 +397,21 @@ export abstract class BaseService<
     const preCreateResult = await this.preCreate(entity, context);
     entity = preCreateResult;
 
-    if (context?.queryRunner) {
-      return context.queryRunner.manager.save(entity);
-    }
+    const saved: T = context?.queryRunner
+      ? await context.queryRunner.manager.save(entity)
+      : await this.repo.save(entity);
+    return this.stripSecrets(saved);
+  }
 
-    return this.repo.save(entity);
+  /** Le risposte non devono mai contenere hash di password né blind index (salvati ma non da esporre). */
+  protected stripSecrets(entity: T): T {
+    if (!entity) return entity;
+    const target = entity as any;
+    delete target.password;
+    for (const field of getEncryptedFields(this.entityTarget)) {
+      if (field.hash) delete target[field.hash.property];
+    }
+    return entity;
   }
 
   async update(
@@ -330,11 +437,10 @@ export abstract class BaseService<
     const preUpdateResult = await this.preUpdate(newEntity, oldEntity, context);
     newEntity = preUpdateResult;
 
-    if (context?.queryRunner) {
-      return context.queryRunner.manager.save(newEntity);
-    }
-
-    return this.repo.save(newEntity);
+    const saved: T = context?.queryRunner
+      ? await context.queryRunner.manager.save(newEntity)
+      : await this.repo.save(newEntity);
+    return this.stripSecrets(saved);
   }
 
   async createOrUpdate(dto: C | U, context?: CustomRequestContext): Promise<T> {

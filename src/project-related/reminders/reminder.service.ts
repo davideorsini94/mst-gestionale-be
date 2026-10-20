@@ -331,6 +331,23 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     });
   }
 
+  /** Contatori per i tab della pagina Reminder (la lista è paginata lato server). */
+  async getCounts(): Promise<Record<string, number>> {
+    const rows = await this.repo
+      .createQueryBuilder('r')
+      .select('r.status', 'status')
+      .addSelect('COUNT(*)', 'count')
+      .groupBy('r.status')
+      .getRawMany();
+    const counts: Record<string, number> = { all: 0 };
+    for (const status of Object.values(ReminderStatus)) counts[status] = 0;
+    for (const row of rows) {
+      counts[row.status] = Number(row.count);
+      counts.all += Number(row.count);
+    }
+    return counts;
+  }
+
   async getAllReminders(filters?: string): Promise<[Reminder[], number]> {
     return this.findAndCountWithFilterList(filters, null);
   }

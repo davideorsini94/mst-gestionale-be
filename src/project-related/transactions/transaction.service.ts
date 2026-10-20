@@ -70,7 +70,10 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
 
     // Rimuovi categoryName dal dto prima di salvare
     const { categoryName, ...transactionData } = dto as any;
-    let transaction = await this.update(uuid, transactionData as UpdateTransactionDto);
+    await this.update(uuid, transactionData as UpdateTransactionDto);
+    // Si ricarica la riga completa: il risultato di update() contiene solo i campi del DTO, senza numero/anno/percorso
+    // della ricevuta (la ricevuta verrebbe rinumerata o generata con dati mancanti)
+    let transaction = await this.findByUuid(uuid);
 
     // Se è un'entrata, rigenera la ricevuta PDF
     if (transaction.type === TransactionType.INCOME) {
@@ -136,71 +139,71 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
     totalIncome: number;
     totalExpense: number;
     balance: number;
-    byCategory: { categoryName: string; total: number; type: string }[];
+    byCategory: { categoryUuid: string | null; categoryName: string; total: number; type: string }[];
     byMonth: { month: string; income: number; expense: number }[];
   }> {
-    const queryBuilder = this.getQueryBuilder('t');
-
-    if (startDate && endDate) {
-      queryBuilder.andWhere('t.date BETWEEN :startDate AND :endDate', { startDate, endDate });
-    } else if (startDate) {
-      queryBuilder.andWhere('t.date >= :startDate', { startDate });
-    } else if (endDate) {
-      queryBuilder.andWhere('t.date <= :endDate', { endDate });
+    // Aggregazioni in SQL: nessun bisogno di caricare (e decifrare) tutti i movimenti
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (startDate) {
+      params.push(startDate);
+      conditions.push(`t.date >= $${params.length}`);
     }
-
+    if (endDate) {
+      params.push(endDate);
+      conditions.push(`t.date <= $${params.length}`);
+    }
     if (categoryUuid) {
-      queryBuilder.andWhere('t.categoryUuid = :categoryUuid', { categoryUuid });
+      params.push(categoryUuid);
+      conditions.push(`t."categoryUuid" = $${params.length}`);
     }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    queryBuilder.leftJoinAndSelect('t.category', 'category');
+    const [totals] = await this.dataSource.query(
+      `SELECT COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'INCOME'), 0) AS income,
+              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'EXPENSE'), 0) AS expense
+       FROM transactions t ${where}`,
+      params,
+    );
 
-    const transactions = await queryBuilder.getMany();
+    // Per categoria E tipo: una categoria usata sia per entrate sia per uscite produce due righe
+    const byCategory = await this.dataSource.query(
+      `SELECT t."categoryUuid" AS "categoryUuid", COALESCE(c.name, 'Senza categoria') AS "categoryName",
+              t.type AS type, COALESCE(SUM(t.amount), 0) AS total
+       FROM transactions t LEFT JOIN categories c ON c.uuid = t."categoryUuid"
+       ${where}
+       GROUP BY t."categoryUuid", c.name, t.type
+       ORDER BY total DESC`,
+      params,
+    );
 
-    let totalIncome = 0;
-    let totalExpense = 0;
-    const categoryMap = new Map<string, { categoryName: string; total: number; type: string }>();
-    const monthMap = new Map<string, { income: number; expense: number }>();
+    // Mese dalla data del movimento (to_char: nessuno slittamento di fuso orario)
+    const byMonth = await this.dataSource.query(
+      `SELECT to_char(t.date, 'YYYY-MM') AS month,
+              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'INCOME'), 0) AS income,
+              COALESCE(SUM(t.amount) FILTER (WHERE t.type = 'EXPENSE'), 0) AS expense
+       FROM transactions t ${where}
+       GROUP BY 1 ORDER BY 1 DESC`,
+      params,
+    );
 
-    for (const t of transactions) {
-      const amount = Number(t.amount);
-
-      if (t.type === TransactionType.INCOME) {
-        totalIncome += amount;
-      } else {
-        totalExpense += amount;
-      }
-
-      // By category
-      const catKey = t.category?.uuid || 'uncategorized';
-      const catName = t.category?.name || 'Senza categoria';
-      if (!categoryMap.has(catKey)) {
-        categoryMap.set(catKey, { categoryName: catName, total: 0, type: t.type });
-      }
-      const catEntry = categoryMap.get(catKey);
-      catEntry.total += amount;
-
-      // By month
-      const monthKey = new Date(t.date).toISOString().slice(0, 7);
-      if (!monthMap.has(monthKey)) {
-        monthMap.set(monthKey, { income: 0, expense: 0 });
-      }
-      const monthEntry = monthMap.get(monthKey);
-      if (t.type === TransactionType.INCOME) {
-        monthEntry.income += amount;
-      } else {
-        monthEntry.expense += amount;
-      }
-    }
-
+    const totalIncome = Number(totals.income);
+    const totalExpense = Number(totals.expense);
     return {
       totalIncome,
       totalExpense,
       balance: totalIncome - totalExpense,
-      byCategory: Array.from(categoryMap.values()),
-      byMonth: Array.from(monthMap.entries())
-        .map(([month, data]) => ({ month, ...data }))
-        .sort((a, b) => b.month.localeCompare(a.month)),
+      byCategory: byCategory.map((r: any) => ({
+        categoryUuid: r.categoryUuid,
+        categoryName: r.categoryName,
+        type: r.type,
+        total: Number(r.total),
+      })),
+      byMonth: byMonth.map((r: any) => ({
+        month: r.month,
+        income: Number(r.income),
+        expense: Number(r.expense),
+      })),
     };
   }
 }

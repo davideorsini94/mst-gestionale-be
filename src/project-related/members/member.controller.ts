@@ -53,6 +53,7 @@ export class MemberController {
 
   @Get(':uuid/profile-image')
   @ApiOperation({ summary: 'Ottieni immagine profilo' })
+  @RequireCapabilities(Capability.CAN_VIEW_MEMBERS)
   async getProfileImage(
     @Param('uuid') uuid: string,
     @Res({ passthrough: true }) res: FastifyReply,
@@ -104,6 +105,7 @@ export class MemberController {
       },
     },
   })
+  @RequireCapabilities(Capability.CAN_VIEW_MEMBERS)
   async generateHotelBookingList(@Body() body: { memberUuids: string[] }) {
     return this.memberService.generateHotelBookingList(body.memberUuids);
   }
@@ -120,6 +122,7 @@ export class MemberController {
       },
     },
   })
+  @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
   async uploadProfileImage(@Param('uuid') uuid: string, @Req() req: FastifyRequest) {
     const body = req.body as any;
     const file = body.file;
@@ -139,6 +142,7 @@ export class MemberController {
   // Elimina foto profilo
   @Delete(':uuid/profile-image')
   @ApiOperation({ summary: 'Elimina foto profilo tesserato' })
+  @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
   async deleteProfileImage(@Param('uuid') uuid: string) {
     return this.memberService.deleteProfileImage(uuid);
   }
@@ -158,6 +162,7 @@ export class MemberController {
       },
     },
   })
+  @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
   async uploadDocument(
     @Param('uuid') uuid: string,
     @Req() req: FastifyRequest,
@@ -186,6 +191,7 @@ export class MemberController {
   // Lista documenti
   @Get(':uuid/documents')
   @ApiOperation({ summary: 'Lista documenti tesserato' })
+  @RequireCapabilities(Capability.CAN_VIEW_MEMBERS)
   async getDocuments(@Param('uuid') uuid: string) {
     return this.memberService.getDocuments(uuid);
   }
@@ -194,6 +200,7 @@ export class MemberController {
   // Mantenuto per retrocompatibilità
   @Get('documents/:documentUuid/download')
   @ApiOperation({ summary: 'Download documento (usa /files/:fileUuid/download)' })
+  @RequireCapabilities(Capability.CAN_VIEW_MEMBERS)
   async downloadDocument(
     @Param('documentUuid') documentUuid: string,
     @Res({ passthrough: true }) res: FastifyReply,
@@ -209,6 +216,7 @@ export class MemberController {
   // Elimina documento
   @Delete('documents/:documentUuid')
   @ApiOperation({ summary: 'Elimina documento' })
+  @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
   async deleteDocument(@Param('documentUuid') documentUuid: string) {
     await this.memberService.deleteDocument(documentUuid);
     return { success: true };

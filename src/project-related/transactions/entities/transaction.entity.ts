@@ -1,10 +1,18 @@
 import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { EncryptedColumn } from '../../../common/crypto/encrypted-column';
 import { IctBaseEntity } from '../../../common/base-crud/ict-base.entity';
 import { Category } from '../../categories/entities/category.entity';
 
 export enum TransactionType {
   INCOME = 'INCOME',
   EXPENSE = 'EXPENSE',
+}
+
+export enum AmountReviewStatus {
+  /** L'importo era stato rovinato dall'import e l'utente l'ha corretto */
+  CORRECTED = 'CORRECTED',
+  /** L'utente ha confermato che l'importo è giusto */
+  CONFIRMED = 'CONFIRMED',
 }
 
 export enum PaymentMethod {
@@ -29,10 +37,13 @@ export class Transaction extends IctBaseEntity {
   @Column({ type: 'date' })
   date: Date;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true, hash: { property: 'subjectHash', kind: 'exact' } })
   subject: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
+  subjectHash: string;
+
+  @EncryptedColumn({ nullable: true })
   description: string;
 
   @ManyToOne(() => Category, { nullable: true })
@@ -45,19 +56,19 @@ export class Transaction extends IctBaseEntity {
   @Column({ type: 'enum', enum: PaymentMethod, default: PaymentMethod.CASH })
   paymentMethod: PaymentMethod;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   reference: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   invoiceNumber: string;
 
-  @Column({ nullable: true })
+  @EncryptedColumn({ nullable: true })
   counterpart: string;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   notes: string;
 
-  @Column({ type: 'text', nullable: true })
+  @EncryptedColumn({ nullable: true, type: 'text' })
   notes2: string;
 
   @Column({ nullable: true })
@@ -80,4 +91,17 @@ export class Transaction extends IctBaseEntity {
 
   @Column({ nullable: true })
   receiptYear: number;
+
+  // Revisione degli importi rovinati dal vecchio import Excel (v1.3): valori originali conservati per l'annullamento
+  @Column({ type: 'varchar', nullable: true })
+  amountReview: AmountReviewStatus | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  amountBeforeReview: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  originalAmountBeforeReview: number | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  amountReviewedAt: Date | null;
 }
