@@ -3,3 +3,5 @@ node_modules
 .env_local
 dist
 package-lock.json
+# backup creati da Impostazioni → Backup (in sviluppo)
+/backups/
