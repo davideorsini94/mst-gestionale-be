@@ -1,5 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { exec } from 'child_process';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -11,10 +11,23 @@ import { KEY_CHECK_SETTING } from '../../migrations/1760900001000-EncryptSensiti
 
 const execAsync = promisify(exec);
 
+/** Nomi dei file di backup generati dall'app (niente percorsi: blocca ../ e simili). */
+const BACKUP_FILENAME = /^(db|minio)-backup-[0-9TZ-]+\.(sql|tar)$/;
+
+/** Cartelle in cui cercare pg_dump / pg_restore oltre al PATH (Homebrew, Debian/Ubuntu). */
+const PG_BIN_FALLBACK_DIRS = [
+  '/opt/homebrew/opt/libpq/bin',
+  '/opt/homebrew/opt/postgresql@16/bin',
+  '/usr/local/opt/libpq/bin',
+  '/usr/local/opt/postgresql@16/bin',
+  '/usr/lib/postgresql/16/bin',
+];
+
 @Injectable()
 export class BackupService {
   private readonly logger = new Logger(BackupService.name);
-  private readonly backupDir = path.join(process.cwd(), 'backups');
+  /** BACKUP_DIR permette di montare la cartella come volume (dentro il container andrebbe persa a ogni aggiornamento) */
+  private readonly backupDir = path.resolve(process.env.BACKUP_DIR || path.join(process.cwd(), 'backups'));
 
   constructor(
     private readonly minioService: MinioService,
@@ -25,101 +38,125 @@ export class BackupService {
     }
   }
 
-  private async checkPgDumpAvailable(): Promise<boolean> {
-    try {
-      await execAsync('which pg_dump');
-      return true;
-    } catch {
-      return false;
+  /** Percorso di pg_dump / pg_restore: PG_BIN_DIR, poi PATH, poi le cartelle abituali. */
+  private findPgBinary(name: 'pg_dump' | 'pg_restore'): string {
+    const dirs = [
+      process.env.PG_BIN_DIR,
+      ...(process.env.PATH || '').split(path.delimiter),
+      ...PG_BIN_FALLBACK_DIRS,
+    ].filter((d): d is string => !!d);
+    for (const dir of dirs) {
+      const candidate = path.join(dir, name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // prossima cartella
+      }
     }
+    throw new InternalServerErrorException(
+      `${name} non è installato sul server: il backup del database non è disponibile (installare il client PostgreSQL 16)`,
+    );
   }
 
-  private async checkPgRestoreAvailable(): Promise<boolean> {
-    try {
-      await execAsync('which pg_restore');
-      return true;
-    } catch {
-      return false;
-    }
+  private dbConnectionArgs(): string[] {
+    return [
+      '-h', process.env.DB_HOST || 'localhost',
+      '-p', process.env.DB_PORT || '5432',
+      '-U', process.env.DB_USERNAME || 'postgres',
+    ];
+  }
+
+  /**
+   * Esegue un programma senza shell (la password passa dall'ambiente, non dalla riga di comando).
+   * stdout può essere scritto su file e stdin letto da file, così il dump non passa dalla memoria.
+   */
+  private runProcess(bin: string, args: string[], io: { stdoutFile?: string; stdinFile?: string } = {}): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(bin, args, {
+        env: { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || 'postgres' },
+        stdio: [io.stdinFile ? 'pipe' : 'ignore', io.stdoutFile ? 'pipe' : 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr!.on('data', (chunk) => {
+        stderr = (stderr + chunk.toString()).slice(-4000);
+      });
+
+      let output: fs.WriteStream | null = null;
+      let outputDone: Promise<void> = Promise.resolve();
+      if (io.stdoutFile) {
+        output = fs.createWriteStream(io.stdoutFile);
+        outputDone = new Promise((res, rej) => {
+          output!.on('finish', () => res());
+          output!.on('error', rej);
+        });
+        child.stdout!.pipe(output);
+      }
+      if (io.stdinFile) {
+        const input = fs.createReadStream(io.stdinFile);
+        input.on('error', (err) => {
+          child.kill();
+          reject(err);
+        });
+        child.stdin!.on('error', () => undefined); // il processo può chiudere stdin prima della fine (errore già in stderr)
+        input.pipe(child.stdin!);
+      }
+
+      child.on('error', reject);
+      child.on('close', (code) => {
+        outputDone
+          .then(() => {
+            if (code === 0) resolve();
+            else reject(new Error(stderr.trim() || `${path.basename(bin)} terminato con codice ${code}`));
+          })
+          .catch(reject);
+      });
+    });
   }
 
   async createDatabaseBackup(): Promise<{ filename: string; path: string; size: number }> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `db-backup-${timestamp}.sql`;
     const backupPath = path.join(this.backupDir, filename);
-
-    const dbHost = process.env.DB_HOST || 'localhost';
-    const dbPort = process.env.DB_PORT || '5432';
-    const dbUser = process.env.DB_USERNAME || 'postgres';
-    const dbPassword = process.env.DB_PASSWORD || 'postgres';
     const dbName = process.env.DB_DATABASE || 'mst_gestionale';
 
+    this.logger.log(`Creating database backup: ${filename}`);
+    const pgDump = this.findPgBinary('pg_dump');
     try {
-      this.logger.log(`Creating database backup: ${filename}`);
-      
-      const isAvailable = await this.checkPgDumpAvailable();
-      if (!isAvailable) {
-        throw new Error(
-          'PostgreSQL client tools not found. Please install PostgreSQL client tools:\n' +
-          'macOS: brew install postgresql@16\n' +
-          'Ubuntu/Debian: sudo apt-get install postgresql-client\n' +
-          'Or ensure pg_dump is in your PATH'
-        );
-      }
-      
-      const command = `PGPASSWORD="${dbPassword}" pg_dump -h ${dbHost} -p ${dbPort} -U ${dbUser} -F c -b -v -f "${backupPath}" ${dbName}`;
-      
-      await execAsync(command);
-      
+      // formato "custom" (compresso), lo stesso letto dal ripristino
+      await this.runProcess(pgDump, [...this.dbConnectionArgs(), '-F', 'c', '-b', dbName], { stdoutFile: backupPath });
       const stats = fs.statSync(backupPath);
-      
+      if (stats.size === 0) throw new Error('il file di backup è vuoto');
       this.logger.log(`Database backup created successfully: ${filename} (${stats.size} bytes)`);
-      
-      return {
-        filename,
-        path: backupPath,
-        size: stats.size,
-      };
+      return { filename, path: backupPath, size: stats.size };
     } catch (error) {
+      fs.rmSync(backupPath, { force: true });
       this.logger.error(`Failed to create database backup: ${error.message}`, error.stack);
-      throw new Error(`Database backup failed: ${error.message}`);
+      throw new InternalServerErrorException(`Backup del database non riuscito: ${error.message}`);
     }
   }
 
   async restoreDatabaseBackup(backupPath: string): Promise<void> {
-    const dbHost = process.env.DB_HOST || 'localhost';
-    const dbPort = process.env.DB_PORT || '5432';
-    const dbUser = process.env.DB_USERNAME || 'postgres';
-    const dbPassword = process.env.DB_PASSWORD || 'postgres';
     const dbName = process.env.DB_DATABASE || 'mst_gestionale';
+    const pgRestore = this.findPgBinary('pg_restore');
 
     try {
       this.logger.log(`Restoring database from: ${backupPath}`);
-      
-      const isAvailable = await this.checkPgRestoreAvailable();
-      if (!isAvailable) {
-        throw new Error(
-          'PostgreSQL client tools not found. Please install PostgreSQL client tools:\n' +
-          'macOS: brew install postgresql@16\n' +
-          'Ubuntu/Debian: sudo apt-get install postgresql-client\n' +
-          'Or ensure pg_restore is in your PATH'
-        );
-      }
-      
+
       // Il file deve essere un archivio leggibile PRIMA di toccare il database
       try {
-        await execAsync(`pg_restore --list "${backupPath}" > /dev/null`);
+        await this.runProcess(pgRestore, ['--list'], { stdinFile: backupPath });
       } catch {
-        throw new Error('Il file non è un backup del database valido: nessuna modifica effettuata');
+        throw new BadRequestException('Il file non è un backup del database valido: nessuna modifica effettuata');
       }
 
       // Schema pulito prima del restore: con "-c" la tabella migrations della versione attuale sopravviverebbe a un
       // dump di una versione precedente (le migrazioni risulterebbero eseguite su dati non migrati).
       await dataSource.query('DROP SCHEMA public CASCADE');
       await dataSource.query('CREATE SCHEMA public');
-      const command = `PGPASSWORD="${dbPassword}" pg_restore -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${dbName} --no-owner -v "${backupPath}"`;
-
-      await execAsync(command);
+      await this.runProcess(pgRestore, [...this.dbConnectionArgs(), '-d', dbName, '--no-owner'], {
+        stdinFile: backupPath,
+      });
 
       // Porta il DB ripristinato alla versione attuale (cifratura compresa) e allinea i file
       const executed = await dataSource.runMigrations({ transaction: 'each' });
@@ -136,7 +173,8 @@ export class BackupService {
       this.logger.log('Database restore completed successfully');
     } catch (error) {
       this.logger.error(`Failed to restore database: ${error.message}`, error.stack);
-      throw new Error(`Database restore failed: ${error.message}`);
+      if (error instanceof BadRequestException) throw error;
+      throw new InternalServerErrorException(`Ripristino del database non riuscito: ${error.message}`);
     }
   }
 
@@ -184,7 +222,7 @@ export class BackupService {
       };
     } catch (error) {
       this.logger.error(`Failed to create MinIO backup: ${error.message}`, error.stack);
-      throw new Error(`MinIO backup failed: ${error.message}`);
+      throw new InternalServerErrorException(`Backup dei file non riuscito: ${error.message}`);
     }
   }
 
@@ -274,7 +312,7 @@ export class BackupService {
         }
       }
       
-      throw new Error(`MinIO restore failed: ${error.message}`);
+      throw new InternalServerErrorException(`Ripristino dei file non riuscito: ${error.message}`);
     }
   }
 
@@ -301,7 +339,7 @@ export class BackupService {
     const files = fs.readdirSync(this.backupDir);
     
     return files
-      .filter(f => f.endsWith('.sql') || f.endsWith('.tar'))
+      .filter((f) => BACKUP_FILENAME.test(f))
       .map(filename => {
         const filePath = path.join(this.backupDir, filename);
         const stats = fs.statSync(filePath);
@@ -310,43 +348,32 @@ export class BackupService {
           filename,
           type: (filename.startsWith('db-backup') ? 'database' : 'minio') as 'database' | 'minio',
           size: stats.size,
-          createdAt: stats.birthtime,
+          // birthtime non è affidabile su Linux/overlayfs (può valere 0)
+          createdAt: stats.mtime,
         };
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
-  async deleteBackup(filename: string): Promise<void> {
+  /** Percorso di un backup esistente; rifiuta nomi che non sono backup dell'app. */
+  private resolveBackupFile(filename: string): string {
+    if (!BACKUP_FILENAME.test(filename)) {
+      throw new BadRequestException('Nome del file di backup non valido');
+    }
     const filePath = path.join(this.backupDir, filename);
-    
     if (!fs.existsSync(filePath)) {
-      throw new Error('Backup file not found');
+      throw new NotFoundException('Backup non trovato');
     }
+    return filePath;
+  }
 
-    if (!filePath.startsWith(this.backupDir)) {
-      throw new Error('Invalid backup path');
-    }
-
-    fs.unlinkSync(filePath);
+  async deleteBackup(filename: string): Promise<void> {
+    fs.unlinkSync(this.resolveBackupFile(filename));
     this.logger.log(`Backup deleted: ${filename}`);
   }
 
   async downloadBackup(filename: string): Promise<{ path: string; size: number }> {
-    const filePath = path.join(this.backupDir, filename);
-    
-    if (!fs.existsSync(filePath)) {
-      throw new Error('Backup file not found');
-    }
-
-    if (!filePath.startsWith(this.backupDir)) {
-      throw new Error('Invalid backup path');
-    }
-
-    const stats = fs.statSync(filePath);
-    
-    return {
-      path: filePath,
-      size: stats.size,
-    };
+    const filePath = this.resolveBackupFile(filename);
+    return { path: filePath, size: fs.statSync(filePath).size };
   }
 }

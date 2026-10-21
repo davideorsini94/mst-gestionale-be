@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install gnupg wget -y && \
  RUN apt-get update && apt-get install ffmpeg libsm6 libxext6 -y
  RUN apt-get update && apt-get install -y libgcc-s1 libstdc++6 python3 gcc g++ make
 
+# pg_dump / pg_restore per backup e ripristino dalle Impostazioni (Ubuntu 24.04 = client PostgreSQL 16, come il server)
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 && rm -rf /var/lib/apt/lists/*
+
 # Imposta la directory di lavoro su suis-catalog all'interno del container
 WORKDIR /mst-gestionale-be
 
