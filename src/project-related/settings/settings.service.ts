@@ -39,11 +39,21 @@ export class SettingsService {
   }
 
   async upsert(key: string, value: any, description?: string): Promise<Settings> {
+    if (typeof key !== 'string' || !key.trim()) {
+      throw new BadRequestException('Chiave dell\'impostazione mancante');
+    }
     if (key.startsWith(INTERNAL_PREFIX)) {
       throw new BadRequestException('Impostazione riservata');
     }
     let settings = await this.findByKey(key);
 
+    if (key === 'adminEmail') {
+      // destinatario dei promemoria: vuoto = nessuno (si usa ADMIN_EMAIL), altrimenti un indirizzo valido
+      value = typeof value === 'string' ? value.trim() : value;
+      if (value !== '' && value !== null && (typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) {
+        throw new BadRequestException('Email dell\'amministratore non valida');
+      }
+    }
     if (key === SMTP_KEY && value && typeof value === 'object') {
       value = this.prepareSmtpValue(value, settings?.value);
     }
@@ -69,8 +79,9 @@ export class SettingsService {
   private prepareSmtpValue(value: any, previous: any): any {
     const { hasPassword, ...rest } = value;
     const next = { ...rest };
-    if (next.pass) {
-      next.pass = isEncryptedValue(next.pass) ? previous?.pass : encryptString(String(next.pass), SMTP_PASS_AAD);
+    // un valore già cifrato inviato dal client vale come "password non cambiata" (stessi controlli del campo vuoto)
+    if (next.pass && !isEncryptedValue(next.pass)) {
+      next.pass = encryptString(String(next.pass), SMTP_PASS_AAD);
     } else {
       // La password salvata resta valida solo per lo stesso server e utente: altrimenti basterebbe salvare un proprio
       // server SMTP (senza conoscere la password) per riceverla al primo invio

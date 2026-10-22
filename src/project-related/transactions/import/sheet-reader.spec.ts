@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { parseDateCell, readFirstSheet } from './sheet-reader';
+import { decodeWindows1252, parseDateCell, readFirstSheet } from './sheet-reader';
 import { detectDecimalSeparator, legacyStoredAmount, parseAmountCell } from './amount-parser';
 
 function xlsxBuffer(rows: any[][], numberFormat?: string, opts: { date1904?: boolean } = {}): Buffer {
@@ -70,5 +70,17 @@ describe('readFirstSheet + parser: il bug delle migliaia', () => {
     const { rows } = readFirstSheet(buffer);
     expect(rows[1][1].v).toBe('Società');
     expect(parseAmountCell(rows[1][2].v, ',')).toBe(1000);
+  });
+
+  it('windows-1252: € e apostrofo tipografico decodificati anche dove Node li legge come latin1', () => {
+    const bytes = Buffer.from([0x80, 0x20, 0x32, 0x2e, 0x30, 0x30, 0x30, 0x2c, 0x30, 0x30, 0x3b, 0x44, 0x92, 0x41]);
+    expect(decodeWindows1252(bytes)).toBe('€ 2.000,00;D’A');
+  });
+
+  it('anni: due cifre completate, quattro cifre prese alla lettera e fuori intervallo rifiutati', () => {
+    expect(parseDateCell('1/1/99')).toBe('1999-01-01');
+    expect(parseDateCell('1/1/24')).toBe('2024-01-01');
+    expect(() => parseDateCell('1/1/0099')).toThrow();
+    expect(() => parseDateCell('2500-01-01')).toThrow();
   });
 });

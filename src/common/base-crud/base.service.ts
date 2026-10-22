@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { FindManyOptions } from 'typeorm/find-options/FindManyOptions';
 import {
   Between,
@@ -201,7 +202,16 @@ export abstract class BaseService<
       return {};
     }
 
-    return JSON.parse(filters) as BaseFilterList<T>;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(filters);
+    } catch {
+      throw new BadRequestException('Parametro filters non valido (JSON atteso)');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new BadRequestException('Parametro filters non valido');
+    }
+    return parsed as BaseFilterList<T>;
   }
 
   public filtersStringToOptions(filters: string): FindManyOptions<T> {

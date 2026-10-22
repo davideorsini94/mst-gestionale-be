@@ -17,15 +17,19 @@ export const NOTE_CATEGORY_RULES: NoteRule[] = [
   { category: 'Into The Race', pattern: /\binto ?the ?race\b|\brace \d{2}\/\d{2}\b|\bacconto race\b|\babbonament[oi] race\b/ },
   { category: 'Into The Ski', pattern: /\binto ?the ?ski\b/ },
   { category: 'Into The Snow', pattern: /\binto ?the ?snow\b/ },
+  // prima di Corsi e moduli (che contiene \bquota\b): "Quota associativa" è una quota sociale, non un corso
+  { category: 'Quote associative', pattern: /\bquot[ae] associativ[ae]\b/ },
   {
     category: 'Versamenti e giroconti',
-    pattern: /\bversament[oi] su c\/c\b|\bprelievo\b|\btrasferimento conto\b|\bricarica (carta )?pre ?pagata\b|\bgiroconto\b/,
+    // "Commissioni di prelievo" sono spese bancarie, non un prelievo
+    pattern: /\bversament[oi] su c\/c\b|(?<!\bcommission\w* (?:di |su |per )?)\bprelievo\b|\btrasferimento conto\b|\bricarica (carta )?pre ?pagata\b|\bgiroconto\b/,
   },
+  // prima dei Tesseramenti FISI: "Diaria giudice FISI" è un costo della gara, non un tesseramento
+  { category: 'Organizzazione gare', pattern: /\bgiudice\b|\bdiaria td\b|\bcrono|\bpremi[oa]?\b|\bpremiazion|\bspeaker\b|\bmedagli|\bpettoral|\bgonfiabile\b/ },
   {
     category: 'Tesseramenti FISI',
     pattern: /\bliste fis\b|\bfisip?\b|\btesser[ae]\b|\btesseramento\b|\baffiliazione\b|^start\b/,
   },
-  { category: 'Organizzazione gare', pattern: /\bgiudice\b|\bdiaria td\b|\bcrono|\bpremi[oa]?\b|\bpremiazion|\bspeaker\b|\bmedagli|\bpettoral|\bgonfiabile\b/ },
   { category: 'Stipendi e diarie', pattern: /\bstipend|\bdiar[aie]{0,2}\b|\bcompens[oi]\b/ },
   // "1 Week end (no skipass e hotel)": la parola skipass qui non indica la spesa
   { category: 'Corsi e moduli', pattern: /\bweek ?end\b/ },
@@ -34,6 +38,9 @@ export const NOTE_CATEGORY_RULES: NoteRule[] = [
     category: 'Hotel e alloggi',
     pattern: /\bhotel\b|\bresidence\b|\balloggi|\bappartamento\b|\bpernottament|\bsoggiorno\b|\brifugio\b/,
   },
+  // prima di Iscrizioni gare: "Iscrizione corso" è un corso, "Pranzo gara" / "Ristorante dopo gara" sono pasti
+  { category: 'Corsi e moduli', pattern: /\biscri[sz]ion\w* (?:al |a |del |ai )?(?:corso|corsi|modul[oi])\b/ },
+  { category: 'Pasti', pattern: /\bpranz|\bcen[ae]\b|\bristorante\b/ },
   {
     category: 'Iscrizioni gare',
     pattern: /\biscri[sz]i|\bgar[ae]\b|\bnjr\b|\bfis\b|\bregionali\b|\bcampionat/,
@@ -56,7 +63,7 @@ export const NOTE_CATEGORY_RULES: NoteRule[] = [
       /\bcommission|\bcanone\b|\bc\/c\b|\bimposta di? ?bollo\b|\brendicont|\bcompetenze di chiusura\b|\binternet banking\b|\bcbill\b|\bbanca\b|\binteressi\b|\bspese di (pagamento|ricarica)\b|\bpos\b|\bbonific|\bpaypal\b|\bestinzione conto\b/,
   },
   { category: 'Tasse e imposte', pattern: /\bf24\b|\biva\b|\btasse\b|\bimposte\b|\bdeleg|\bmarche da bollo\b|\bvidimazione\b/ },
-  { category: 'Pasti', pattern: /\bcen[ae]\b|\bpranz|\bcolazion|\bpizza\b|\bgrigliata\b|\bbuffet\b|\btorta\b|\bautogrill\b|\bspesa\b|\bristorante\b/ },
+  { category: 'Pasti', pattern: /\bcen[ae]\b|\bpranz|\bcolazion|\bpizza\b|\bgrigliata\b|\bbuffet\b|\btorta\b|\bautogrill\b|\bspesa\b(?! (?:per |di )?materia)|\bristorante\b/ },
   {
     category: 'Divise e merchandising',
     pattern:

@@ -3,6 +3,17 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { UserService } from '../models/users/user.service';
 import { User } from '../models/users/entities/user.entity';
+import { MIN_PASSWORD_LENGTH } from './password-reset/password-reset.service';
+
+/** Nuova password: obbligatoria e lunga almeno quanto richiesto dal recupero password. */
+function assertNewPassword(newPassword: unknown): asserts newPassword is string {
+  if (typeof newPassword !== 'string' || newPassword === '') {
+    throw new BadRequestException('Inserisci la nuova password');
+  }
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    throw new BadRequestException(`La nuova password deve essere di almeno ${MIN_PASSWORD_LENGTH} caratteri`);
+  }
+}
 
 @Injectable()
 export class AuthService {
@@ -48,6 +59,12 @@ export class AuthService {
     currentPassword: string,
     newPassword: string,
   ): Promise<{ success: boolean; message: string }> {
+    // controlli prima di bcrypt: con un campo mancante bcrypt.compare lanciava un errore (500)
+    if (typeof currentPassword !== 'string' || currentPassword === '') {
+      throw new BadRequestException('Inserisci la password attuale');
+    }
+    assertNewPassword(newPassword);
+
     const user = await this.userService.findByUuidWithPassword(userUuid);
     if (!user?.password) {
       throw new BadRequestException('Utente non trovato');
@@ -56,10 +73,6 @@ export class AuthService {
     const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
     if (!isCurrentPasswordValid) {
       throw new BadRequestException('Password attuale non corretta');
-    }
-
-    if (newPassword.length < 6) {
-      throw new BadRequestException('La nuova password deve essere di almeno 6 caratteri');
     }
 
     await this.userService.update(userUuid, { password: newPassword });
@@ -73,6 +86,14 @@ export class AuthService {
     targetUserUuid: string,
     newPassword: string,
   ): Promise<{ success: boolean; message: string }> {
+    if (typeof adminPassword !== 'string' || adminPassword === '') {
+      throw new BadRequestException('Inserisci la tua password per confermare');
+    }
+    if (typeof targetUserUuid !== 'string' || !targetUserUuid) {
+      throw new BadRequestException('Utente da modificare mancante');
+    }
+    assertNewPassword(newPassword);
+
     const admin = await this.userService.findByUuidWithPassword(adminUuid);
     if (!admin?.password) {
       throw new BadRequestException('Utente admin non trovato');
@@ -86,10 +107,6 @@ export class AuthService {
     const targetUser = await this.userService.findByUuid(targetUserUuid);
     if (!targetUser) {
       throw new BadRequestException('Utente target non trovato');
-    }
-
-    if (newPassword.length < 6) {
-      throw new BadRequestException('La nuova password deve essere di almeno 6 caratteri');
     }
 
     await this.userService.update(targetUserUuid, { password: newPassword });

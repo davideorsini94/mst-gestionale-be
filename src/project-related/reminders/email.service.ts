@@ -24,6 +24,21 @@ const reminderTypeLabels: Record<ReminderType, string> = {
   [ReminderType.MEMBER_MEDICAL_CERTIFICATE]: 'Scadenza Visita Medica Tesserato',
 };
 
+/** Escape per i valori inseriti nell'HTML delle email (nomi e descrizioni li scrive l'utente). */
+export function escapeHtml(value: unknown): string {
+  return String(value ?? '').replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
+}
+
+/** Timeout SMTP: un server lento o sbagliato non deve tenere bloccata una richiesta (o il controllo giornaliero). */
+const SMTP_TIMEOUTS = {
+  connectionTimeout: 15_000,
+  greetingTimeout: 15_000,
+  socketTimeout: 30_000,
+};
+
 @Injectable()
 export class EmailService {
   constructor(
@@ -45,6 +60,7 @@ export class EmailService {
         port: config.port || 587,
         secure: config.port === 465,
         auth: { user: config.user, pass: config.pass },
+        ...SMTP_TIMEOUTS,
       });
     }
 
@@ -87,9 +103,7 @@ export class EmailService {
       secure: config.port === 465,
       auth: config.user ? { user: config.user, pass: config.pass } : undefined,
       // un server sbagliato non deve tenere bloccata la richiesta per minuti
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 30_000,
+      ...SMTP_TIMEOUTS,
     });
 
     const now = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
@@ -140,12 +154,12 @@ export class EmailService {
       };
 
       // Aggiungi CC se specificato e diverso dal destinatario principale
-      if (ccEmail && ccEmail !== recipientEmail) {
+      if (ccEmail && ccEmail.trim().toLowerCase() !== recipientEmail.trim().toLowerCase()) {
         mailOptions.cc = ccEmail;
       }
 
       await transporter.sendMail(mailOptions);
-      this.logger.info(`[EmailService] Email sent to ${recipientEmail}${ccEmail ? ` (CC: ${ccEmail})` : ''}`, { subject });
+      this.logger.info(`[EmailService] Email inviata${ccEmail ? ' (con CC)' : ''}`);
     } else {
       // Senza SMTP l'email non parte: il reminder deve risultare FALLITO (non inviato) per poter essere reinviato
       throw new Error('SMTP non configurato: email non inviata (Impostazioni → Email)');
@@ -159,8 +173,7 @@ export class EmailService {
     if (!transporter || !config) {
       throw new Error('SMTP non configurato');
     }
-    const esc = (v: string) =>
-      String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    const esc = escapeHtml;
     const html = `<!DOCTYPE html>
 <html><body style="font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; color: #0F1E3A; line-height: 1.5;">
   <div style="max-width: 520px; margin: 0 auto; padding: 24px;">
@@ -191,6 +204,11 @@ export class EmailService {
     subjectDescription: string,
     formattedDate: string,
   ): string {
+    // nome e descrizione arrivano dalle anagrafiche: senza escape un "<" rompeva l'email (o vi inseriva HTML)
+    recipientName = escapeHtml(recipientName);
+    typeLabel = escapeHtml(typeLabel);
+    subjectDescription = escapeHtml(subjectDescription);
+    formattedDate = escapeHtml(formattedDate);
     return `
 <!DOCTYPE html>
 <html>

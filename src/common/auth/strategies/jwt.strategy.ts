@@ -3,19 +3,15 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';
 import { UserService } from '../../models/users/user.service';
 
-const extractJwtFromHeaderOrQueryParam = (req: any) => {
-  let token = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
-  if (!token && req.query && req.query.token) {
-    token = req.query.token;
-  }
-  return token;
-};
+// solo header Authorization: un token in query finirebbe nei log di nginx e nella cronologia del browser
+// (i PDF si aprono via blob, i backup con un biglietto monouso)
+const extractJwtFromHeader = ExtractJwt.fromAuthHeaderAsBearerToken();
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(private userService: UserService) {
     super({
-      jwtFromRequest: extractJwtFromHeaderOrQueryParam,
+      jwtFromRequest: extractJwtFromHeader,
       ignoreExpiration: false,
       secretOrKey: process.env.JWT_SECRET,
     });

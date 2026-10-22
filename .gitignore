@@ -1,7 +1,10 @@
 node_modules
 .DS_Store
+# configurazioni locali con segreti: mai nel repository (esempio in .env.example)
+.env
 .env_local
+.env.*
+!.env.example
 dist
-package-lock.json
 # backup creati da Impostazioni → Backup (in sviluppo)
 /backups/

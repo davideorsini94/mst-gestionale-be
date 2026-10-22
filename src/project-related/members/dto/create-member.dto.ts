@@ -1,15 +1,19 @@
-import { IsString, IsOptional, IsEmail, IsEnum, IsDateString, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsEmail, Matches, ValidateIf, IsEnum, IsBoolean } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { BaseSaveDto } from '../../../common/base-crud/base-save.dto';
+import { IsCalendarDate } from '../../../common/validators/calendar-date';
+import { hasEmailValue } from '../../../common/validators/person-fields';
 import { Gender, MemberType, MemberStatus } from '../entities/member.entity';
 
 export class CreateMemberDto extends BaseSaveDto {
   @ApiProperty()
-  @IsString()
+  @IsString({ message: 'Il nome è obbligatorio' })
+  @Matches(/\S/, { message: 'Il nome è obbligatorio' })
   firstName: string;
 
   @ApiProperty()
-  @IsString()
+  @IsString({ message: 'Il cognome è obbligatorio' })
+  @Matches(/\S/, { message: 'Il cognome è obbligatorio' })
   lastName: string;
 
   @ApiProperty({ enum: Gender, required: false })
@@ -24,7 +28,7 @@ export class CreateMemberDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   birthDate?: string;
 
   @ApiProperty({ required: false })
@@ -42,10 +46,11 @@ export class CreateMemberDto extends BaseSaveDto {
   @IsString()
   nationality?: string;
 
-  @ApiProperty({ required: false })
-  @IsOptional()
-  @IsEmail()
-  email?: string;
+  // "" o null tolgono l'email (salvata come null): si valida solo un indirizzo effettivamente inserito
+  @ApiProperty({ required: false, nullable: true })
+  @ValidateIf(hasEmailValue)
+  @IsEmail({}, { message: 'Indirizzo email non valido' })
+  email?: string | null;
 
   @ApiProperty({ required: false })
   @IsOptional()
@@ -99,7 +104,7 @@ export class CreateMemberDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   medicalExamExpiry?: string;
 
   @ApiProperty({ required: false, description: 'Visita medica agonistica' })
@@ -129,12 +134,12 @@ export class CreateMemberDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   membershipDate?: string;
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   membershipExpiry?: string;
 
   @ApiProperty({ required: false, description: 'UUID dello staff collegato (se il tesserato è anche membro operativo)' })

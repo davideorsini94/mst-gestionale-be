@@ -128,6 +128,13 @@ export class TransactionMaintenanceController {
     if (!Array.isArray(body?.items) || body.items.length > 200) {
       throw new BadRequestException('Da 1 a 200 movimenti per volta');
     }
+    // gli importi devono arrivare come numeri (una stringa "12" veniva convertita in silenzio)
+    for (const item of body.items) {
+      const original = item?.originalAmount;
+      if (typeof item?.amount !== 'number' || (original !== undefined && original !== null && typeof original !== 'number')) {
+        throw new BadRequestException('Importi non validi: attesi numeri');
+      }
+    }
     return this.service.applyCorrections(body.items);
   }
 

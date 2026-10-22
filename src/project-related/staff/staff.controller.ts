@@ -11,6 +11,8 @@ import {
   Res,
   StreamableFile,
   ForbiddenException,
+  BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { StaffService } from './staff.service';
@@ -22,6 +24,7 @@ import { FileService } from '../../common/files/file.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
 import { StripProtectedFieldsPipe, PROFILE_IMAGE_FIELDS } from '../../common/pipes/strip-protected-fields.pipe';
+import { setFileHeaders } from '../../common/files/file-types';
 
 @ApiTags('Staff')
 @ApiBearerAuth()
@@ -92,11 +95,10 @@ export class StaffController {
     await this.assertStaffAccess(req, uuid, Capability.CAN_VIEW_STAFF);
     const staff = await this.staffService.findByUuidWithDocuments(uuid);
     if (!staff.profileImageUuid) {
-      res.status(404);
-      return { error: 'Profile image not found' };
+      throw new NotFoundException('Nessuna foto profilo');
     }
-    const { stream, mimeType } = await this.fileService.getFileStream(staff.profileImageUuid);
-    res.header('Content-Type', mimeType);
+    const { stream, mimeType, originalName } = await this.fileService.getFileStream(staff.profileImageUuid);
+    setFileHeaders(res, mimeType, originalName, 'inline');
     res.header('Cache-Control', 'private, max-age=3600');
     return new StreamableFile(stream);
   }
@@ -115,7 +117,7 @@ export class StaffController {
     // Prima cerca per linkedUserUuid, poi per email come fallback
     const staffMember = await this.findOwnStaff(req);
     if (!staffMember) {
-      throw new Error('Profilo staff non trovato per questo utente');
+      throw new NotFoundException('Profilo staff non trovato per questo utente');
     }
     return this.staffService.update(staffMember.uuid, updateStaffDto);
   }
@@ -152,7 +154,7 @@ export class StaffController {
     const file = body.file;
     
     if (!file) {
-      throw new Error('File non trovato');
+      throw new BadRequestException('Nessun file caricato');
     }
 
     const buffer = await file.toBuffer();
@@ -194,7 +196,7 @@ export class StaffController {
     const file = body.file;
     
     if (!file) {
-      throw new Error('File non trovato');
+      throw new BadRequestException('Nessun file caricato');
     }
 
     const buffer = await file.toBuffer();

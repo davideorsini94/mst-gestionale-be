@@ -41,7 +41,7 @@ export class CapabilitiesPerRoleController {
     @Param('roleCode') roleCode: string,
     @Body() body: { capabilities: Capability[] },
   ) {
-    return this.service.setRoleCapabilities(roleCode, body.capabilities);
+    return this.service.setRoleCapabilities(roleCode, body?.capabilities);
   }
 
   @Post('roles/:roleCode/:capability')

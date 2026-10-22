@@ -199,6 +199,13 @@ export function sortRows<T extends Record<string, any>>(rows: T[], order: Memory
   });
 }
 
+/** IsNull() o Not(IsNull()): condizioni che non leggono il valore cifrato. */
+function isNullCheck(value: unknown): boolean {
+  if (!(value instanceof FindOperator)) return false;
+  if (value.type === 'isNull') return true;
+  return value.type === 'not' && value.child instanceof FindOperator && value.child.type === 'isNull';
+}
+
 /** Lancia un errore se un campo cifrato compare in una condizione `where` destinata al DB. */
 export function assertNoEncryptedWhere(target: Function, where: any, relationTargets: (r: string) => Function | null) {
   if (!where) return;
@@ -207,11 +214,9 @@ export function assertNoEncryptedWhere(target: Function, where: any, relationTar
   for (const condition of conditions) {
     for (const [key, value] of Object.entries(condition ?? {})) {
       if (encrypted.has(key) && value !== undefined) {
-        // IS NULL / IS NOT NULL funziona anche sul testo cifrato
-        if (value instanceof FindOperator && ['isNull', 'not'].includes((value as any).type)) {
-          const inner = (value as any).value;
-          if ((value as any).type === 'isNull' || (inner instanceof FindOperator && inner.type === 'isNull')) continue;
-        }
+        // IS NULL / IS NOT NULL funziona anche sul testo cifrato. Per Not(IsNull()) l'operatore interno è in `child`:
+        // `value` restituirebbe il valore dell'IsNull (undefined) e il filtro verrebbe rifiutato.
+        if (isNullCheck(value)) continue;
         throw new BadRequestException(`Il campo cifrato "${key}" non può essere usato in una condizione SQL`);
       }
       if (value && typeof value === 'object' && !(value instanceof FindOperator) && !Array.isArray(value) && !(value instanceof Date)) {

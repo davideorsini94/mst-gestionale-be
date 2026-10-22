@@ -1,4 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { isActiveContent } from './file-types';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { Repository } from 'typeorm';
@@ -19,22 +20,20 @@ export class FileService {
     folder: string,
     description?: string,
   ): Promise<File> {
-    console.log(`[FileService] uploadFile called - filename: ${file.filename}, folder: ${folder}, bufferSize: ${file.buffer?.length}`);
-    
-    if (!file.buffer || file.buffer.length === 0) {
-      throw new Error('File buffer is empty or undefined');
+    if (!file?.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('Il file è vuoto');
+    }
+    if (isActiveContent(file.mimetype, file.filename)) {
+      throw new BadRequestException('Tipo di file non consentito (HTML, SVG, XML o script)');
     }
     
     // Nome opaco: il nome originale (spesso con dati personali) resta solo nel DB, cifrato
     const ext = path.extname(file.filename || '').toLowerCase();
     const safeExt = /^\.[a-z0-9]{1,8}$/.test(ext) ? ext : '';
     const minioPath = `${folder}/${randomUUID()}${safeExt}`;
-    
-    console.log(`[FileService] Uploading to MinIO path: ${minioPath}`);
-    
+
     // Upload to MinIO
     const savedPath = await this.minioService.uploadFile(minioPath, file.buffer, file.mimetype);
-    console.log(`[FileService] MinIO upload complete, savedPath: ${savedPath}`);
 
     const fileType = this.getFileType(file.mimetype);
     
@@ -48,7 +47,8 @@ export class FileService {
     });
 
     const saved = await this.fileRepository.save(fileEntity);
-    console.log(`[FileService] File entity saved to DB with uuid: ${saved.uuid}`);
+    // nel log solo uuid e dimensione: il nome originale contiene spesso nome e cognome
+    console.log(`[FileService] File caricato: ${saved.uuid} (${file.buffer.length} byte)`);
     
     return saved;
   }
@@ -56,7 +56,7 @@ export class FileService {
   async getFileStream(fileUuid: string): Promise<{ stream: any; mimeType: string; originalName: string }> {
     const file = await this.fileRepository.findOne({ where: { uuid: fileUuid } });
     if (!file) {
-      throw new NotFoundException(`File with uuid ${fileUuid} not found`);
+      throw new NotFoundException('File non trovato');
     }
 
     const stream = await this.minioService.getFile(file.minioPath);
@@ -108,9 +108,9 @@ export class FileService {
   async deleteFileFromMinio(minioPath: string): Promise<void> {
     try {
       await this.minioService.deleteFile(minioPath);
-      console.log(`[FileService] File deleted from MinIO: ${minioPath}`);
     } catch (error) {
-      console.error(`[FileService] Error deleting file from MinIO: ${minioPath}`, error);
+      // niente percorso nel log: i file delle versioni precedenti hanno nomi con dati personali
+      console.error(`[FileService] Errore nella cancellazione di un file da MinIO: ${error?.message ?? error}`);
       throw error;
     }
   }
@@ -132,7 +132,7 @@ export class FileService {
   async deleteFile(fileUuid: string): Promise<void> {
     const file = await this.fileRepository.findOne({ where: { uuid: fileUuid } });
     if (!file) {
-      throw new NotFoundException(`File with uuid ${fileUuid} not found`);
+      throw new NotFoundException('File non trovato');
     }
 
     await this.minioService.deleteFile(file.minioPath);

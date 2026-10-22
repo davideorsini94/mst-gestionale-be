@@ -10,6 +10,9 @@ import {
   Req,
   Res,
   StreamableFile,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { MemberService } from './member.service';
@@ -21,6 +24,7 @@ import { FileService } from '../../common/files/file.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
 import { StripProtectedFieldsPipe, PROFILE_IMAGE_FIELDS } from '../../common/pipes/strip-protected-fields.pipe';
+import { setFileHeaders } from '../../common/files/file-types';
 
 @ApiTags('Members (Tesserati)')
 @ApiBearerAuth()
@@ -61,11 +65,10 @@ export class MemberController {
   ) {
     const member = await this.memberService.findByUuidWithDocuments(uuid);
     if (!member.profileImageUuid) {
-      res.status(404);
-      return { error: 'Profile image not found' };
+      throw new NotFoundException('Nessuna foto profilo');
     }
     const { stream, mimeType, originalName } = await this.fileService.getFileStream(member.profileImageUuid);
-    res.header('Content-Type', mimeType);
+    setFileHeaders(res, mimeType, originalName, 'inline');
     res.header('Cache-Control', 'private, max-age=3600');
     return new StreamableFile(stream);
   }
@@ -103,12 +106,26 @@ export class MemberController {
           items: { type: 'string' },
           description: 'Lista UUID degli atleti da includere',
         },
+        staffUuids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Lista UUID degli allenatori (staff) da aggiungere',
+        },
       },
     },
   })
   @RequireCapabilities(Capability.CAN_VIEW_MEMBERS)
-  async generateHotelBookingList(@Body() body: { memberUuids: string[] }) {
-    return this.memberService.generateHotelBookingList(body.memberUuids);
+  async generateHotelBookingList(
+    @Req() req: FastifyRequest,
+    @Body() body: { memberUuids: string[]; staffUuids?: string[] },
+  ) {
+    const staffUuids = body?.staffUuids ?? [];
+    // i dati degli allenatori sono dati dello staff: serve anche il permesso di vederli
+    const caps: string[] = ((req as any).user?.role?.capabilities ?? []).map((c: any) => c.capability);
+    if (Array.isArray(staffUuids) && staffUuids.length && !caps.includes(Capability.CAN_VIEW_STAFF)) {
+      throw new ForbiddenException('Non hai il permesso di vedere lo staff');
+    }
+    return this.memberService.generateHotelBookingList(body?.memberUuids, staffUuids);
   }
 
   // Upload foto profilo
@@ -129,7 +146,7 @@ export class MemberController {
     const file = body.file;
     
     if (!file) {
-      throw new Error('File non trovato');
+      throw new BadRequestException('Nessun file caricato');
     }
 
     const buffer = await file.toBuffer();
@@ -172,13 +189,14 @@ export class MemberController {
     const file = body.file;
     
     if (!file) {
-      throw new Error('File non trovato');
+      throw new BadRequestException('Nessun file caricato');
     }
 
     const buffer = await file.toBuffer();
     const documentType = body.documentType?.value || MemberDocumentType.OTHER;
     const description = body.description?.value;
-    const expiryDate = body.expiryDate?.value ? new Date(body.expiryDate.value) : undefined;
+    // stringa 'AAAA-MM-GG' validata dal servizio (new Date accettava date inesistenti come il 30 febbraio)
+    const expiryDate = body.expiryDate?.value ? String(body.expiryDate.value).trim() : undefined;
 
     return this.memberService.uploadDocument(
       uuid,

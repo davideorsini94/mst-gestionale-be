@@ -1,15 +1,31 @@
 import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
-import { exec, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { MAX_FILE_SIZE_BYTES, MinioService } from 'src/minio/minio.service';
 import { dataSource } from '../../datasources/data-source';
 import { StorageEncryptionMigration } from '../../minio/storage-encryption.migration';
-import { keyCheckMatches } from '../../common/crypto/field-crypto';
+import { decryptFile, isEncryptedFile, keyCheckMatches } from '../../common/crypto/field-crypto';
 import { KEY_CHECK_SETTING } from '../../migrations/1760900001000-EncryptSensitiveData';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/** Backup e file temporanei leggibili solo dall'utente del processo: contengono tutti i dati (cifrati e non). */
+const PRIVATE_FILE_MODE = 0o600;
+const PRIVATE_DIR_MODE = 0o700;
+
+/** Risposta al client: solo nome e dimensione (mai il percorso sul server). */
+export interface BackupFileInfo {
+  filename: string;
+  size: number;
+}
+
+interface BackupFile extends BackupFileInfo {
+  path: string;
+}
+
+const publicInfo = ({ filename, size }: BackupFile): BackupFileInfo => ({ filename, size });
 
 /** Nomi dei file di backup generati dall'app (niente percorsi: blocca ../ e simili). */
 const BACKUP_FILENAME = /^(db|minio)-backup-[0-9TZ-]+\.(sql|tar)$/;
@@ -34,7 +50,7 @@ export class BackupService {
     private readonly storageMigration: StorageEncryptionMigration,
   ) {
     if (!fs.existsSync(this.backupDir)) {
-      fs.mkdirSync(this.backupDir, { recursive: true });
+      fs.mkdirSync(this.backupDir, { recursive: true, mode: PRIVATE_DIR_MODE });
     }
   }
 
@@ -85,7 +101,7 @@ export class BackupService {
       let output: fs.WriteStream | null = null;
       let outputDone: Promise<void> = Promise.resolve();
       if (io.stdoutFile) {
-        output = fs.createWriteStream(io.stdoutFile);
+        output = fs.createWriteStream(io.stdoutFile, { mode: PRIVATE_FILE_MODE });
         outputDone = new Promise((res, rej) => {
           output!.on('finish', () => res());
           output!.on('error', rej);
@@ -114,7 +130,11 @@ export class BackupService {
     });
   }
 
-  async createDatabaseBackup(): Promise<{ filename: string; path: string; size: number }> {
+  async createDatabaseBackup(): Promise<BackupFileInfo> {
+    return publicInfo(await this.writeDatabaseBackup());
+  }
+
+  private async writeDatabaseBackup(): Promise<BackupFile> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `db-backup-${timestamp}.sql`;
     const backupPath = path.join(this.backupDir, filename);
@@ -125,6 +145,7 @@ export class BackupService {
     try {
       // formato "custom" (compresso), lo stesso letto dal ripristino
       await this.runProcess(pgDump, [...this.dbConnectionArgs(), '-F', 'c', '-b', dbName], { stdoutFile: backupPath });
+      fs.chmodSync(backupPath, PRIVATE_FILE_MODE);
       const stats = fs.statSync(backupPath);
       if (stats.size === 0) throw new Error('il file di backup è vuoto');
       this.logger.log(`Database backup created successfully: ${filename} (${stats.size} bytes)`);
@@ -183,7 +204,7 @@ export class BackupService {
     const dbName = process.env.DB_DATABASE || 'mst_gestionale';
     const pgRestore = this.findPgBinary('pg_restore');
 
-    this.logger.log(`Restoring database from: ${backupPath}`);
+    this.logger.log('Ripristino del database da un file caricato');
     try {
       // lettura completa (non solo l'indice): un file troncato viene scartato qui
       await this.runProcess(pgRestore, ['--file=/dev/null'], { stdinFile: backupPath });
@@ -198,7 +219,7 @@ export class BackupService {
       );
     }
 
-    const safety = await this.createDatabaseBackup();
+    const safety = await this.writeDatabaseBackup();
     this.logger.log(`Backup di sicurezza prima del ripristino: ${safety.filename}`);
 
     try {
@@ -207,7 +228,8 @@ export class BackupService {
       if (!check.length || !keyCheckMatches(check[0].value)) {
         throw new Error('il database ripristinato non corrisponde alle chiavi di cifratura attuali');
       }
-      await this.storageMigration.run();
+      // forzata: i file possono essere stati spostati in non-collegati/ da un ripristino dei file fatto prima
+      await this.storageMigration.run({ force: true, afterRestore: true });
       this.logger.log('Database restore completed successfully');
       return { safetyBackup: safety.filename };
     } catch (error) {
@@ -227,148 +249,147 @@ export class BackupService {
     }
   }
 
-  async createMinioBackup(): Promise<{ filename: string; path: string; size: number }> {
+  async createMinioBackup(): Promise<BackupFileInfo> {
+    return publicInfo(await this.writeMinioBackup());
+  }
+
+  private async writeMinioBackup(): Promise<BackupFile> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `minio-backup-${timestamp}.tar`;
     const backupPath = path.join(this.backupDir, filename);
-    const bucketName = process.env.MINIO_BUCKET || 'bucket';
+    const tempDir = path.join(this.backupDir, `temp-${timestamp}`);
 
     try {
       this.logger.log(`Creating MinIO backup: ${filename}`);
-      
-      const tempDir = path.join(this.backupDir, `temp-${timestamp}`);
-      fs.mkdirSync(tempDir, { recursive: true });
+      fs.mkdirSync(tempDir, { recursive: true, mode: PRIVATE_DIR_MODE });
 
       const objectNames = await this.minioService.listFiles();
-
       this.logger.log(`Found ${objectNames.length} objects in MinIO bucket`);
 
       for (const objectName of objectNames) {
+        this.minioService.assertSafeObjectName(objectName);
         const objectPath = path.join(tempDir, objectName);
-        const objectDir = path.dirname(objectPath);
-        
-        if (!fs.existsSync(objectDir)) {
-          fs.mkdirSync(objectDir, { recursive: true });
-        }
-
+        fs.mkdirSync(path.dirname(objectPath), { recursive: true, mode: PRIVATE_DIR_MODE });
         // Byte così come sono su MinIO: il backup resta cifrato (serve la chiave dell'app per leggerlo)
-        fs.writeFileSync(objectPath, await this.minioService.getRawBuffer(objectName));
+        fs.writeFileSync(objectPath, await this.minioService.getRawBuffer(objectName), { mode: PRIVATE_FILE_MODE });
       }
 
-      const tarCommand = `tar -cf "${backupPath}" -C "${tempDir}" .`;
-      await execAsync(tarCommand);
-
-      await execAsync(`rm -rf "${tempDir}"`);
-
+      await execFileAsync('tar', ['-cf', backupPath, '-C', tempDir, '.']);
+      fs.chmodSync(backupPath, PRIVATE_FILE_MODE);
       const stats = fs.statSync(backupPath);
-      
+
       this.logger.log(`MinIO backup created successfully: ${filename} (${stats.size} bytes)`);
-      
-      return {
-        filename,
-        path: backupPath,
-        size: stats.size,
-      };
+      return { filename, path: backupPath, size: stats.size };
     } catch (error) {
+      fs.rmSync(backupPath, { force: true });
       this.logger.error(`Failed to create MinIO backup: ${error.message}`, error.stack);
       throw new InternalServerErrorException(`Backup dei file non riuscito: ${error.message}`);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
 
-  async restoreMinioBackup(backupPath: string): Promise<void> {
-    const bucketName = process.env.MINIO_BUCKET || 'bucket';
+  /**
+   * Ripristino dei file: gli oggetti vengono caricati con il nome che hanno nell'archivio (i riferimenti nel DB
+   * restano validi), poi la migrazione dei file cifra quelli in chiaro e toglie i dati personali dai nomi (archivi
+   * delle versioni precedenti). Gli oggetti già presenti e non contenuti nell'archivio non vengono toccati.
+   */
+  async restoreMinioBackup(backupPath: string): Promise<{ restored: number }> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    let tempDir: string | null = null;
+    const tempDir = path.join(this.backupDir, `restore-${timestamp}`);
+    let filesUploaded = 0;
+    let totalSize = 0;
 
     try {
-      this.logger.log(`[MinIO Restore] Starting restore from: ${backupPath}`);
-      
+      this.logger.log('[MinIO Restore] Ripristino dei file da un archivio caricato');
       if (!fs.existsSync(backupPath)) {
-        throw new Error(`Backup file not found: ${backupPath}`);
+        throw new Error('file di backup non trovato');
       }
 
-      tempDir = path.join(this.backupDir, `restore-${timestamp}`);
-      fs.mkdirSync(tempDir, { recursive: true });
-      this.logger.log(`[MinIO Restore] Created temp directory: ${tempDir}`);
-
-      this.logger.log(`[MinIO Restore] Extracting tar archive...`);
-      const tarCommand = `tar -xf "${backupPath}" -C "${tempDir}"`;
-      const { stdout, stderr } = await execAsync(tarCommand);
-      if (stderr) {
-        this.logger.warn(`[MinIO Restore] Tar extraction warnings: ${stderr}`);
-      }
-      this.logger.log(`[MinIO Restore] Tar extraction completed`);
-
-      const extractedFiles = fs.readdirSync(tempDir);
-      this.logger.log(`[MinIO Restore] Found ${extractedFiles.length} items in extracted archive: ${extractedFiles.join(', ')}`);
-
-      if (extractedFiles.length === 0) {
-        throw new Error('No files found in backup archive');
+      fs.mkdirSync(tempDir, { recursive: true, mode: PRIVATE_DIR_MODE });
+      try {
+        await execFileAsync('tar', ['-xf', backupPath, '-C', tempDir, '--no-same-owner']);
+      } catch {
+        throw new BadRequestException('Il file non è un archivio di backup dei file valido: nessuna modifica effettuata');
       }
 
-      let filesUploaded = 0;
-      let totalSize = 0;
+      // Prima di toccare MinIO: ogni file cifrato dell'archivio deve decifrarsi con le chiavi di questa installazione.
+      // Prima un archivio di un'altra installazione (es. il test locale, che ha gli stessi nomi di produzione)
+      // sovrascriveva i file buoni con file illeggibili, e l'errore arrivava solo dopo.
+      const files: string[] = [];
+      const collect = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) collect(fullPath);
+          else if (entry.isFile()) files.push(fullPath);
+        }
+      };
+      collect(tempDir);
+      let unreadable = 0;
+      for (const file of files) {
+        const buffer = fs.readFileSync(file);
+        if (!isEncryptedFile(buffer)) continue; // file in chiaro di un backup v1.3: li cifra la migrazione
+        try {
+          decryptFile(buffer);
+        } catch {
+          unreadable++;
+        }
+      }
+      if (unreadable > 0) {
+        throw new BadRequestException(
+          `${unreadable} file dell'archivio sono cifrati con chiavi diverse da quelle di questa installazione ` +
+            '(backup di un altro ambiente?): nessun file è stato modificato',
+        );
+      }
 
-      const uploadFiles = async (dir: string, prefix: string = '') => {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        this.logger.log(`[MinIO Restore] Processing directory: ${dir} (${entries.length} entries)`);
-
-        for (const entry of entries) {
+      // Solo file regolari: collegamenti simbolici o altro presenti nell'archivio vengono ignorati
+      const uploadDir = async (dir: string, prefix = ''): Promise<void> => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           const fullPath = path.join(dir, entry.name);
           const objectName = prefix ? `${prefix}/${entry.name}` : entry.name;
-
           if (entry.isDirectory()) {
-            this.logger.log(`[MinIO Restore] Entering subdirectory: ${objectName}`);
-            await uploadFiles(fullPath, objectName);
-          } else {
-            try {
-              const buffer = fs.readFileSync(fullPath);
-              this.logger.log(`[MinIO Restore] Uploading file: ${objectName} (${buffer.length} bytes)`);
-              // uploadFile non ricifra i file già cifrati e cifra quelli di backup vecchi in chiaro
-              if (buffer.length > MAX_FILE_SIZE_BYTES) {
-                // file oltre il limite dell'app: si carica così com'è invece di interrompere il restore
-                await this.minioService.uploadRaw(objectName, buffer);
-              } else {
-                await this.minioService.uploadFile(objectName, buffer);
-              }
-              filesUploaded++;
-              totalSize += buffer.length;
-              this.logger.log(`[MinIO Restore] ✓ Restored object ${filesUploaded}: ${objectName}`);
-            } catch (uploadError) {
-              this.logger.error(`[MinIO Restore] Failed to upload ${objectName}: ${uploadError.message}`);
-              throw uploadError;
+            await uploadDir(fullPath, objectName);
+          } else if (entry.isFile()) {
+            const buffer = fs.readFileSync(fullPath);
+            // uploadFile non ricifra i file già cifrati e cifra quelli dei backup vecchi in chiaro; oltre il limite
+            // dell'app si carica così com'è (lo cifra la migrazione qui sotto) invece di interrompere il ripristino
+            if (buffer.length > MAX_FILE_SIZE_BYTES) {
+              await this.minioService.uploadRaw(objectName, buffer, undefined, { keepName: true });
+            } else {
+              await this.minioService.uploadFile(objectName, buffer, undefined, { keepName: true });
             }
+            filesUploaded++;
+            totalSize += buffer.length;
           }
         }
       };
-
-      this.logger.log(`[MinIO Restore] Starting file upload to MinIO bucket: ${bucketName}`);
-      await uploadFiles(tempDir);
-
-      this.logger.log(`[MinIO Restore] Cleaning up temp directory: ${tempDir}`);
-      await execAsync(`rm -rf "${tempDir}"`);
-
-      this.logger.log(`[MinIO Restore] ✓ MinIO restore completed successfully: ${filesUploaded} files uploaded (${totalSize} bytes total)`);
-    } catch (error) {
-      this.logger.error(`[MinIO Restore] ✗ Failed to restore MinIO: ${error.message}`, error.stack);
-      
-      if (tempDir && fs.existsSync(tempDir)) {
-        try {
-          this.logger.log(`[MinIO Restore] Cleaning up temp directory after error: ${tempDir}`);
-          await execAsync(`rm -rf "${tempDir}"`);
-        } catch (cleanupError) {
-          this.logger.error(`[MinIO Restore] Failed to cleanup temp directory: ${cleanupError.message}`);
-        }
+      await uploadDir(tempDir);
+      if (filesUploaded === 0) {
+        throw new BadRequestException('L\'archivio non contiene file');
       }
-      
+      this.logger.log(`[MinIO Restore] ${filesUploaded} file caricati (${totalSize} byte)`);
+    } catch (error) {
+      this.logger.error(`[MinIO Restore] Ripristino non riuscito dopo ${filesUploaded} file: ${error.message}`);
+      if (error instanceof BadRequestException) throw error;
       throw new InternalServerErrorException(`Ripristino dei file non riuscito: ${error.message}`);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
+
+    try {
+      await this.storageMigration.run({ force: true, afterRestore: true });
+    } catch (error) {
+      this.logger.error(`[MinIO Restore] Migrazione dei file ripristinati non riuscita: ${error.message}`);
+      throw new InternalServerErrorException(
+        `File ripristinati (${filesUploaded}), ma la cifratura/rinomina dei file non è stata completata: ` +
+          `${error.message}. Riprova il ripristino o riavvia l'app con FORCE_STORAGE_MIGRATION=true`,
+      );
+    }
+    this.logger.log('[MinIO Restore] Ripristino dei file completato');
+    return { restored: filesUploaded };
   }
 
-  async createFullBackup(): Promise<{
-    database: { filename: string; path: string; size: number };
-    minio: { filename: string; path: string; size: number };
-  }> {
+  async createFullBackup(): Promise<{ database: BackupFileInfo; minio: BackupFileInfo }> {
     this.logger.log('Starting full backup (database + MinIO)');
     
     const database = await this.createDatabaseBackup();

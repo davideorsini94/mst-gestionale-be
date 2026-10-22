@@ -81,7 +81,7 @@ export class AuthController {
 
   @Put('preferences')
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Salva le preferenze dell\'utente corrente (tema, trasparenza)' })
+  @ApiOperation({ summary: 'Salva le preferenze dell\'utente corrente (tema, trasparenza): unite a quelle già salvate' })
   @ApiBody({ type: PreferencesDto })
   async updatePreferences(@Request() req, @Body() dto: PreferencesDto): Promise<UserPreferences> {
     return this.userService.updatePreferences(req.user.uuid, dto);
@@ -92,10 +92,11 @@ export class AuthController {
   @ApiOperation({ summary: 'Cambia password utente corrente' })
   @ApiBody({ type: ChangePasswordDto })
   async changePassword(@Request() req, @Body() dto: ChangePasswordDto) {
+    // campi mancanti → 400 dal servizio (prima: errore 500)
     return this.authService.changePassword(
       req.user.uuid,
-      dto.currentPassword,
-      dto.newPassword,
+      dto?.currentPassword,
+      dto?.newPassword,
     );
   }
 
@@ -111,9 +112,9 @@ export class AuthController {
     });
     return this.authService.adminChangePassword(
       req.user.uuid,
-      dto.adminPassword,
-      dto.targetUserUuid,
-      dto.newPassword,
+      dto?.adminPassword,
+      dto?.targetUserUuid,
+      dto?.newPassword,
     );
   }
 }

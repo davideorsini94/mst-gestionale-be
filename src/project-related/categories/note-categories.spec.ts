@@ -44,6 +44,16 @@ describe('categoryFromNote', () => {
     ['Rimborso Km', 'Rimborsi'],
     ['Sponsorizzazione', 'Sponsor e contributi'],
     ['Laser game 2 Alpes', 'Attività complementari'],
+    ['Quota associativa', 'Quote associative'],
+    ['Quota Associativa 25/26', 'Quote associative'],
+    ['Spesa materiale', 'Materiale e noleggi'],
+    ['Spesa per materiale', 'Materiale e noleggi'],
+    ['Spesa supermercato', 'Pasti'],
+    ['Diaria giudice FISI', 'Organizzazione gare'],
+    ['Commissioni di prelievo', 'Banca e commissioni'],
+    ['Commissione prelievo ATM', 'Banca e commissioni'],
+    ['Prelievo contanti', 'Versamenti e giroconti'],
+    ['Tessera FISI', 'Tesseramenti FISI'],
   ])('%s → %s', (note, expected) => {
     expect(categoryFromNote(note)).toBe(expected);
   });

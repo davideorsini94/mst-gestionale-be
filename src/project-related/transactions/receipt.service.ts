@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import * as PDFDocument from 'pdfkit';
 import * as path from 'path';
 import { Transaction, TransactionType } from './entities/transaction.entity';
@@ -7,6 +7,7 @@ import { dataSource } from '../../datasources/data-source';
 import { EntityManager, Repository } from 'typeorm';
 import { AnnulledReceipt } from './entities/annulled-receipt.entity';
 import { decryptString, isEncryptedValue } from '../../common/crypto/field-crypto';
+import { formatEuro } from './money';
 
 /** Ricevuta annullata o numero tenuto da un duplicato archiviato (elenco unico per l'interfaccia). */
 export interface AnnulledReceiptView {
@@ -69,7 +70,7 @@ export class ReceiptService {
       try {
         await this.minioService.deleteFile(oldPath);
       } catch (error) {
-        console.error(`[ReceiptService] Error deleting old receipt ${oldPath}:`, error);
+        console.error(`[ReceiptService] Error deleting old receipt: ${error?.message}`);
       }
     }
   }
@@ -148,6 +149,15 @@ export class ReceiptService {
        WHERE data->>'receiptNumber' IS NOT NULL ${year ? `AND (data->>'receiptYear')::int = $1` : ''}`,
       year ? [year] : [],
     );
+    // duplicati di versioni precedenti con lo stesso numero di una ricevuta attiva: quel numero non è "fuori uso"
+    const active: { y: number; n: number }[] = archived.length
+      ? await dataSource.query(
+          `SELECT "receiptYear" AS y, "receiptNumber" AS n FROM transactions
+           WHERE "receiptNumber" IS NOT NULL ${year ? `AND "receiptYear" = $1` : ''}`,
+          year ? [year] : [],
+        )
+      : [];
+    const activeKeys = new Set(active.map((r) => `${r.y}/${r.n}`));
     const decrypt = (v: unknown) =>
       typeof v === 'string' && isEncryptedValue(v) ? decryptString(v, 'transactions.subject') : (v as string) ?? null;
     const rows: AnnulledReceiptView[] = [
@@ -171,7 +181,9 @@ export class ReceiptService {
         date: r.data.date ? String(r.data.date).slice(0, 10) : null,
         amount: r.data.amount === null ? null : Number(r.data.amount),
         subject: decrypt(r.data.subject),
-        reason: 'Duplicato da import archiviato (ripristinabile da Manutenzione dati)',
+        reason: activeKeys.has(`${Number(r.data.receiptYear)}/${Number(r.data.receiptNumber)}`)
+          ? 'Duplicato da import archiviato: il numero è usato dalla ricevuta attiva (se ripristinato riceve un numero nuovo)'
+          : 'Duplicato da import archiviato (ripristinabile da Manutenzione dati)',
         annulledAt: new Date(r.removedAt).toISOString(),
         hasPdf: !!r.data.receiptMinioPath,
       })),
@@ -213,8 +225,13 @@ export class ReceiptService {
         doc.moveDown(6);
 
         const receiptNumber = transaction.receiptNumber || 1;
+        // la data è un giorno di calendario 'AAAA-MM-GG' (eventuale orario ignorato, come fa il DB): new Date()
+        // la leggerebbe in UTC e "2095-12-31T23:30Z" diventava 01/01/2096 sul PDF
+        const isoDay = String(transaction.date ?? '').match(/^(\d{4})-(\d{2})-(\d{2})/);
         const transactionDate = new Date(transaction.date);
-        const formattedDate = `${transactionDate.getDate().toString().padStart(2, '0')}/${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}/${transactionDate.getFullYear()}`;
+        const formattedDate = isoDay
+          ? `${isoDay[3]}/${isoDay[2]}/${isoDay[1]}`
+          : `${transactionDate.getDate().toString().padStart(2, '0')}/${(transactionDate.getMonth() + 1).toString().padStart(2, '0')}/${transactionDate.getFullYear()}`;
 
         doc.fontSize(12);
 
@@ -239,7 +256,7 @@ export class ReceiptService {
 
         doc.text('Importo:', 50, startY + 70);
         doc.rect(200, startY + 65, 340, 25).stroke();
-        doc.text(`€ ${Number(transaction.amount).toFixed(2)}`, 205, startY + 70, { width: 330 });
+        doc.text(formatEuro(transaction.amount), 205, startY + 70, { width: 330 });
 
         doc.text('per:', 50, startY + 105);
         doc.rect(200, startY + 100, 340, 25).stroke();
@@ -248,7 +265,7 @@ export class ReceiptService {
         doc.rect(50, startY + 145, 50, 25).stroke();
         doc.text('TOTALE', 55, startY + 152);
         doc.rect(100, startY + 145, 120, 25).stroke();
-        doc.text(`€ ${Number(transaction.amount).toFixed(2)}`, 105, startY + 152, { width: 110, align: 'center' });
+        doc.text(formatEuro(transaction.amount), 105, startY + 152, { width: 110, align: 'center' });
 
         doc.image(stampPath, 300, startY + 170, { width: 200 });
 
@@ -343,15 +360,23 @@ export class ReceiptService {
     if (minioPath) {
       try {
         await this.minioService.deleteFile(minioPath);
-        console.log(`[ReceiptService] Receipt deleted from MinIO: ${minioPath}`);
+        console.log('[ReceiptService] Receipt deleted from MinIO');
       } catch (error) {
-        console.error(`[ReceiptService] Error deleting receipt: ${minioPath}`, error);
+        console.error(`[ReceiptService] Error deleting receipt: ${error?.message}`);
       }
     }
   }
 
   async getReceiptStream(minioPath: string): Promise<any> {
-    return this.minioService.getFile(minioPath);
+    try {
+      return await this.minioService.getFile(minioPath);
+    } catch (error) {
+      // file assente su MinIO (es. ricevuta di un vecchio import mai generata): 404, non errore del server
+      if (['NoSuchKey', 'NotFound'].includes(error?.code) || /not found|does not exist/i.test(error?.message ?? '')) {
+        throw new NotFoundException('PDF della ricevuta non disponibile');
+      }
+      throw error;
+    }
   }
 
   /**

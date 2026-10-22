@@ -13,6 +13,7 @@ import { FastifyReply, FastifyRequest } from 'fastify';
 import { FileService } from './file.service';
 import { RequireAnyCapability } from '../auth/decorators/capabilities.decorator';
 import { Capability } from '../models/capabilities-per-role/capability.enum';
+import { setFileHeaders } from './file-types';
 
 @ApiTags('Files')
 @ApiBearerAuth()
@@ -42,8 +43,7 @@ export class FileController {
   ) {
     await this.assertCanView(req, uuid);
     const { stream, mimeType, originalName } = await this.fileService.getFileStream(uuid);
-    res.header('Content-Type', mimeType);
-    res.header('Content-Disposition', `inline; filename="${encodeURIComponent(originalName)}"`);
+    setFileHeaders(res, mimeType, originalName, 'inline');
     res.header('Cache-Control', 'private, max-age=3600');
     return new StreamableFile(stream);
   }
@@ -58,8 +58,7 @@ export class FileController {
   ) {
     await this.assertCanView(req, uuid);
     const { stream, mimeType, originalName } = await this.fileService.getFileStream(uuid);
-    res.header('Content-Type', mimeType);
-    res.header('Content-Disposition', `attachment; filename="${encodeURIComponent(originalName)}"`);
+    setFileHeaders(res, mimeType, originalName, 'attachment');
     return new StreamableFile(stream);
   }
   // Nessuna cancellazione generica: foto e documenti si eliminano dagli endpoint di tesserati/staff, che controllano
