@@ -426,7 +426,10 @@ export abstract class BaseService<
 
     const newEntity: T = await this.updateDtoToEntity(dto, context);
     newEntity.uuid = uuid;
-    return this.updateFromEntity(newEntity, oldEntity, context);
+    await this.updateFromEntity(newEntity, oldEntity, context);
+    // Si restituisce la riga completa: con un aggiornamento parziale l'entità salvata contiene solo i campi inviati, e
+    // chi la usa dopo (reminder, risposta al client) vedrebbe null al posto dei valori rimasti nel DB
+    return this.stripSecrets(await this.findByUuid(uuid, context));
   }
 
   async updateFromEntity(

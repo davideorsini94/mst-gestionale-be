@@ -22,7 +22,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    const user = await this.userService.findByUsername(payload.username);
+    const user = await this.userService.findByUuidWithRole(payload.sub);
+    // utente cancellato o disattivato: i token già emessi smettono di valere subito
+    if (!user || user.isActive === false) return null;
+    // token emesso prima dell'ultimo cambio/reset della password (1s di tolleranza: iat è in secondi)
+    if (user.passwordChangedAt && payload.iat && payload.iat * 1000 < new Date(user.passwordChangedAt).getTime() - 1000) {
+      return null;
+    }
     return user;
   }
 }

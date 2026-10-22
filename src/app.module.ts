@@ -23,6 +23,7 @@ import { SettingsModule } from './project-related/settings/settings.module';
 import { MemberModule } from './project-related/members/member.module';
 import { DashboardModule } from './project-related/dashboard/dashboard.module';
 import { ReminderModule } from './project-related/reminders/reminder.module';
+import { PasswordResetModule } from './common/auth/password-reset/password-reset.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { ReminderModule } from './project-related/reminders/reminder.module';
     MemberModule,
     DashboardModule,
     ReminderModule,
+    PasswordResetModule,
   ],
   controllers: [AppController],
   providers: [

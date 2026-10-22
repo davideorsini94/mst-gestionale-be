@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, NotFoundException, Inject, forwardRef, BadRequestException } from '@nestjs/common';
 import { BaseService } from '../../common/base-crud/base.service';
 import { Member, MemberDocument, MemberDocumentType, Gender, MemberType } from './entities/member.entity';
 import { CreateMemberDto } from './dto/create-member.dto';
@@ -45,6 +45,20 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     const member = await super.update(uuid, dto);
     await this.reminderService.updateMemberReminders(member);
     return member;
+  }
+
+  /** Cancella il tesserato con foto e documenti (DB e MinIO) e annulla i suoi reminder. */
+  async delete(uuid: string): Promise<Member> {
+    const member = await this.repo.findOne({ where: { uuid }, relations: ['documents'] });
+    if (!member) {
+      throw new NotFoundException(`Member with uuid ${uuid} not found`);
+    }
+    const fileUuids = [member.profileImageUuid, ...member.documents.map((d) => d.fileUuid)].filter(Boolean);
+    await this.reminderService.cancelRemindersForEntity(uuid);
+    const deleted = await super.delete(uuid);
+    // i file dopo il record: se MinIO non risponde resta al massimo un file orfano, mai un tesserato senza file
+    await this.fileService.deleteFilesQuietly(fileUuids);
+    return deleted;
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Member> {
@@ -140,6 +154,12 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
     }
 
     // Struttura: members/{uuid}/documents/{tipo}
+    if (!Object.values(MemberDocumentType).includes(documentType)) {
+      throw new BadRequestException(`Tipo di documento non valido: ${documentType}`);
+    }
+    if (expiryDate !== undefined && expiryDate !== null && isNaN(new Date(expiryDate as any).getTime())) {
+      throw new BadRequestException('Data di scadenza non valida (usa AAAA-MM-GG)');
+    }
     const docTypeFolder = documentType.toLowerCase().replace(/_/g, '-');
     const folder = `members/${memberUuid}/documents/${docTypeFolder}`;
 
@@ -154,7 +174,13 @@ export class MemberService extends BaseService<Member, CreateMemberDto, UpdateMe
       memberUuid,
     });
 
-    return this.documentRepository.save(document);
+    try {
+      return await this.documentRepository.save(document);
+    } catch (error) {
+      // il file è già su MinIO: senza il documento resterebbe orfano
+      await this.fileService.deleteFilesQuietly([fileEntity.uuid]);
+      throw error;
+    }
   }
 
   async getDocuments(memberUuid: string): Promise<MemberDocument[]> {

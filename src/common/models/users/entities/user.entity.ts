@@ -38,6 +38,10 @@ export class User extends IctBaseEntity {
   @Column({ default: true })
   isActive: boolean;
 
+  /** Ultimo cambio/reset della password: i token di login emessi prima non valgono più. */
+  @Column({ type: 'timestamp', nullable: true })
+  passwordChangedAt: Date | null;
+
   @ManyToOne(() => Role, { eager: true })
   @JoinColumn({ name: 'roleCode', referencedColumnName: 'code' })
   role: Role;

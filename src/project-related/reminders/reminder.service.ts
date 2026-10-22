@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, BadRequestException, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -298,10 +298,29 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     return this.repo.save(reminder);
   }
 
+  /** Annulla i reminder ancora da inviare di un tesserato/staff/veicolo (chiamato quando viene cancellato). */
+  async cancelRemindersForEntity(entityUuid: string): Promise<void> {
+    await this.repo.update(
+      { subjectEntityUuid: entityUuid, status: In([ReminderStatus.SCHEDULED, ReminderStatus.FAILED]) },
+      { status: ReminderStatus.CANCELLED },
+    );
+  }
+
+  /** Il soggetto del reminder esiste ancora? (non si reinviano promemoria di tesserati/staff/veicoli cancellati) */
+  private async subjectExists(reminder: Reminder): Promise<boolean> {
+    const table = { Member: 'members', Staff: 'staff', Vehicle: 'vehicles' }[reminder.subjectEntityType];
+    if (!table || !reminder.subjectEntityUuid) return true;
+    const rows = await this.repo.query(`SELECT 1 FROM "${table}" WHERE uuid = $1`, [reminder.subjectEntityUuid]);
+    return rows.length > 0;
+  }
+
   async resendReminder(uuid: string): Promise<Reminder> {
     const reminder = await this.findByUuid(uuid);
     if (!reminder) {
-      throw new Error('Reminder non trovato');
+      throw new NotFoundException('Reminder non trovato');
+    }
+    if (!(await this.subjectExists(reminder))) {
+      throw new BadRequestException('Il soggetto di questo reminder è stato eliminato: non viene reinviato');
     }
 
     reminder.status = ReminderStatus.SCHEDULED;

@@ -28,7 +28,9 @@ export class DashboardController {
   ) {
     const user = req.user;
     const roleCode = user.role?.code;
-    const days = daysAhead || 30;
+    // i parametri di query arrivano come stringhe: "30" sommato a una data dava 2230 giorni
+    const parsed = Number(daysAhead);
+    const days = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 3650) : 30;
 
     // Admin: vede tutto
     if (roleCode === 'admin') {

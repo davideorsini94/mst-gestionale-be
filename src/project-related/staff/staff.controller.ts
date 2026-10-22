@@ -21,6 +21,7 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import { FileService } from '../../common/files/file.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
+import { StripProtectedFieldsPipe, PROFILE_IMAGE_FIELDS } from '../../common/pipes/strip-protected-fields.pipe';
 
 @ApiTags('Staff')
 @ApiBearerAuth()
@@ -103,14 +104,14 @@ export class StaffController {
   @Post()
   @ApiOperation({ summary: 'Crea membro staff' })
   @RequireCapabilities(Capability.CAN_MANAGE_STAFF)
-  async create(@Body() createStaffDto: CreateStaffDto) {
+  async create(@Body(new StripProtectedFieldsPipe(PROFILE_IMAGE_FIELDS)) createStaffDto: CreateStaffDto) {
     return this.staffService.create(createStaffDto);
   }
 
   // Endpoint per modificare il proprio profilo staff (deve essere PRIMA di :uuid)
   @Put('me')
   @ApiOperation({ summary: 'Aggiorna il proprio profilo staff' })
-  async updateMyProfile(@Req() req: FastifyRequest, @Body() updateStaffDto: UpdateStaffDto) {
+  async updateMyProfile(@Req() req: FastifyRequest, @Body(new StripProtectedFieldsPipe([...PROFILE_IMAGE_FIELDS, 'linkedUserUuid', 'staffRole', 'status', 'hireDate', 'email'])) updateStaffDto: UpdateStaffDto) {
     // Prima cerca per linkedUserUuid, poi per email come fallback
     const staffMember = await this.findOwnStaff(req);
     if (!staffMember) {
@@ -122,7 +123,7 @@ export class StaffController {
   @Put(':uuid')
   @ApiOperation({ summary: 'Aggiorna membro staff' })
   @RequireCapabilities(Capability.CAN_MANAGE_STAFF)
-  async update(@Param('uuid') uuid: string, @Body() updateStaffDto: UpdateStaffDto) {
+  async update(@Param('uuid') uuid: string, @Body(new StripProtectedFieldsPipe(PROFILE_IMAGE_FIELDS)) updateStaffDto: UpdateStaffDto) {
     return this.staffService.update(uuid, updateStaffDto);
   }
 

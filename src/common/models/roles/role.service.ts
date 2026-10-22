@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { dataSource } from '../../../datasources/data-source';
 import { Role } from './entities/role.entity';
 import { Capability } from '../capabilities-per-role/capability.enum';
@@ -29,6 +29,13 @@ export class RoleService {
   }
 
   async delete(code: string): Promise<void> {
+    if (code === 'admin') {
+      throw new BadRequestException('Il ruolo admin non si può eliminare');
+    }
+    const [{ count }] = await dataSource.query(`SELECT count(*)::int AS count FROM users WHERE "roleCode" = $1`, [code]);
+    if (count > 0) {
+      throw new BadRequestException(`Il ruolo è assegnato a ${count} utenti: assegna loro un altro ruolo prima di eliminarlo`);
+    }
     await this.repo.delete({ code });
   }
 

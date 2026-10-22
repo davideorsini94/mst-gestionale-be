@@ -61,6 +61,13 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
    * Override update per gestire la creazione automatica della categoria
    */
   async updateTransaction(uuid: string, dto: UpdateTransactionDto): Promise<Transaction> {
+    // una modifica alla volta per movimento: due modifiche contemporanee consumavano numeri di ricevuta
+    return this.receiptService.withTransactionLock(uuid, () => this.doUpdateTransaction(uuid, dto));
+  }
+
+  private async doUpdateTransaction(uuid: string, dto: UpdateTransactionDto): Promise<Transaction> {
+    // la ricevuta emessa com'è ora (importo, data, soggetto): se viene annullata l'archivio deve riportare questi dati
+    const before = await this.findByUuid(uuid);
     // Se c'è categoryName ma non categoryUuid, trova o crea la categoria
     if ((dto as any).categoryName && !dto.categoryUuid) {
       // Crea sempre categorie come BOTH così appaiono sia per entrate che uscite
@@ -78,7 +85,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
     // Se è un'entrata, rigenera la ricevuta PDF
     if (transaction.type === TransactionType.INCOME) {
       try {
-        const receiptData = await this.receiptService.updateReceipt(transaction);
+        const receiptData = await this.receiptService.updateReceipt(transaction, before);
         transaction.receiptMinioPath = receiptData.minioPath;
         transaction.receiptNumber = receiptData.receiptNumber;
         transaction.receiptYear = receiptData.receiptYear;
@@ -87,9 +94,12 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
       } catch (error) {
         console.error(`[TransactionService] Error updating receipt for transaction ${transaction.uuid}:`, error);
       }
-    } else if (transaction.receiptMinioPath) {
-      // Se il tipo è cambiato da INCOME a EXPENSE, elimina la ricevuta
-      await this.receiptService.deleteReceipt(transaction.receiptMinioPath);
+    } else if (transaction.receiptNumber || transaction.receiptMinioPath) {
+      // Da entrata a uscita: la ricevuta emessa viene annullata (numero e PDF in archivio, il numero non si riusa)
+      await this.receiptService.annulReceipt(
+        before?.receiptNumber === transaction.receiptNumber ? before : transaction,
+        'Movimento cambiato da entrata a uscita',
+      );
       transaction.receiptMinioPath = null;
       transaction.receiptNumber = null;
       transaction.receiptYear = null;
@@ -100,28 +110,18 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
   }
 
   async deleteTransaction(uuid: string): Promise<void> {
-    const transaction = await this.findByUuid(uuid);
-    if (!transaction) {
-      return;
-    }
-
-    const wasIncome = transaction.type === TransactionType.INCOME;
-    const receiptYear = transaction.receiptYear;
-
-    // Elimina la ricevuta se esiste
-    if (transaction.receiptMinioPath) {
-      await this.receiptService.deleteReceipt(transaction.receiptMinioPath);
-    }
-
-    // Elimina la transazione
-    await this.delete(uuid);
-
-    // Se era un'entrata, rigenera tutte le ricevute dell'anno per mantenere la numerazione coerente
-    if (wasIncome && receiptYear) {
-      console.log(`[TransactionService] Rigenerazione ricevute per anno ${receiptYear} dopo eliminazione`);
-      await this.receiptService.regenerateReceiptsForYear(receiptYear);
-    }
+    await this.receiptService.withTransactionLock(uuid, async () => {
+      const transaction = await this.findByUuid(uuid);
+      if (!transaction) {
+        return;
+      }
+      // La ricevuta emessa non sparisce e le altre non vengono rinumerate: il numero risulta annullato (con il PDF)
+      await this.receiptService.annulReceipt(transaction, 'Movimento eliminato');
+      await this.delete(uuid);
+    });
   }
+
+
 
   async getReceiptStream(uuid: string): Promise<any> {
     const transaction = await this.findByUuid(uuid);

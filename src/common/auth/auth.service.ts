@@ -13,7 +13,8 @@ export class AuthService {
 
   async validateUser(username: string, password: string): Promise<User | null> {
     const user = await this.userService.findByUsernameWithPassword(username);
-    if (user?.password && (await bcrypt.compare(password, user.password))) {
+    // un utente disattivato non entra (stesso errore delle credenziali sbagliate: nessuna informazione in più)
+    if (user?.password && user.isActive !== false && (await bcrypt.compare(password, user.password))) {
       delete user.password;
       return user;
     }

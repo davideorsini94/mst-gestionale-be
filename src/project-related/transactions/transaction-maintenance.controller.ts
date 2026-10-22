@@ -55,7 +55,7 @@ export class TransactionMaintenanceController {
   }
 
   @Post('duplicates/remove')
-  @ApiOperation({ summary: 'Sposta i duplicati in archivio (ripristinabili) e rinumera le ricevute' })
+  @ApiOperation({ summary: 'Sposta i duplicati in archivio (ripristinabili), senza rinumerare le ricevute' })
   async removeDuplicates(@Body() body: { expectedCount: number }) {
     if (typeof body?.expectedCount !== 'number') {
       throw new BadRequestException('expectedCount obbligatorio (dall\'anteprima)');

@@ -4,6 +4,8 @@ import { Baseline1700000000000 } from '../migrations/1700000000000-Baseline';
 import { SchemaV141760900000000 } from '../migrations/1760900000000-SchemaV14';
 import { EncryptSensitiveData1760900001000 } from '../migrations/1760900001000-EncryptSensitiveData';
 import { CategorizeFromNotes1760900002000 } from '../migrations/1760900002000-CategorizeFromNotes';
+import { AnnulledReceipts1760900003000 } from '../migrations/1760900003000-AnnulledReceipts';
+import { PasswordReset1760900004000 } from '../migrations/1760900004000-PasswordReset';
 
 if (process.env.DB_SYNCHRONIZE === 'true') {
   // synchronize con colonne che cambiano tipo fa DROP+ADD della colonna (perdita dati): dalla v1.4 lo schema
@@ -26,6 +28,8 @@ export const dataSource: DataSource = new DataSource({
     SchemaV141760900000000,
     EncryptSensitiveData1760900001000,
     CategorizeFromNotes1760900002000,
+    AnnulledReceipts1760900003000,
+    PasswordReset1760900004000,
   ],
   migrationsTableName: 'migrations',
   migrationsTransactionMode: 'each',

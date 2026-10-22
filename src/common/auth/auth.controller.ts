@@ -6,6 +6,8 @@ import { AuthService } from './auth.service';
 import { Public } from './decorators/public.decorator';
 import { UserService } from '../models/users/user.service';
 import { UserPreferences } from '../models/users/entities/user.entity';
+import { RequireCapabilities } from './decorators/capabilities.decorator';
+import { Capability } from '../models/capabilities-per-role/capability.enum';
 
 class LoginDto {
   username: string;
@@ -20,6 +22,11 @@ class ChangePasswordDto {
 class PreferencesDto {
   theme?: 'light' | 'dark' | 'system';
   reduceTransparency?: boolean;
+}
+
+class OwnProfileDto {
+  firstName?: string;
+  lastName?: string;
 }
 
 class AdminChangePasswordDto {
@@ -61,6 +68,17 @@ export class AuthController {
     };
   }
 
+  @Put('me')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Aggiorna nome e cognome dell\'utente corrente (email, ruolo e stato li cambia un amministratore)' })
+  @ApiBody({ type: OwnProfileDto })
+  async updateOwnProfile(@Request() req, @Body() dto: OwnProfileDto) {
+    // l'email resta fuori: collega l'utente al suo profilo staff, cambiarla da soli permetterebbe di prenderne un altro
+    const user = await this.userService.updateOwnProfile(req.user.uuid, dto);
+    const { password, emailHash, ...rest } = user as any;
+    return rest;
+  }
+
   @Put('preferences')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Salva le preferenze dell\'utente corrente (tema, trasparenza)' })
@@ -82,10 +100,15 @@ export class AuthController {
   }
 
   @Post('admin-change-password')
+  // reimpostare la password di un altro utente è gestione utenti (la password richiesta è solo una conferma)
+  @RequireCapabilities(Capability.CAN_MANAGE_USERS)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Cambia password di un altro utente (richiede password admin)' })
   @ApiBody({ type: AdminChangePasswordDto })
   async adminChangePassword(@Request() req, @Body() dto: AdminChangePasswordDto) {
+    await this.userService.assertAdminRules(req.user, await this.userService.findByUuid(dto?.targetUserUuid).catch(() => null), {
+      password: true,
+    });
     return this.authService.adminChangePassword(
       req.user.uuid,
       dto.adminPassword,
