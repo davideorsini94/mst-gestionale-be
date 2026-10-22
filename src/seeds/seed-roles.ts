@@ -1,7 +1,7 @@
 import { dataSource } from '../datasources/data-source';
 import { Role } from '../common/models/roles/entities/role.entity';
 import { CapabilityPerRole } from '../common/models/capabilities-per-role/entities/capability-per-role.entity';
-import { Capability } from '../common/models/capabilities-per-role/capability.enum';
+import { ADMIN_ONLY_CAPABILITIES, ADMIN_ROLE_CODE, Capability } from '../common/models/capabilities-per-role/capability.enum';
 
 // Tutte le capabilities (solo stringhe, non valori numerici)
 const ALL_CAPS = Object.values(Capability).filter(
@@ -74,6 +74,16 @@ export async function seedRoles(): Promise<void> {
       await capabilityRepo.save(capEntity);
     }
     console.log(`[Seed] ${roleConfig.capabilities.length} capabilities assegnate a '${roleConfig.code}'`);
+  }
+
+  // movimenti, statistiche, voci di bilancio e backup: solo admin (anche nei ruoli creati dall'interfaccia)
+  const removed = await capabilityRepo
+    .createQueryBuilder()
+    .delete()
+    .where('"roleCode" <> :admin AND capability IN (:...caps)', { admin: ADMIN_ROLE_CODE, caps: [...ADMIN_ONLY_CAPABILITIES] })
+    .execute();
+  if (removed.affected) {
+    console.log(`[Seed] ${removed.affected} permessi riservati all'admin tolti da altri ruoli`);
   }
 
   console.log('[Seed] Seed ruoli completato');

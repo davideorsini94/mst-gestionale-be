@@ -41,3 +41,35 @@ export enum Capability {
 export const ALL_CAPABILITIES = Object.values(Capability).filter(
   (value) => typeof value === 'string',
 );
+
+/** Codice del ruolo amministratore. */
+export const ADMIN_ROLE_CODE = 'admin';
+
+/**
+ * Permessi su tutto ciò che riguarda i soldi (movimenti e ricevute, statistiche, voci di bilancio) e sui backup
+ * (che contengono anche i dati contabili): riservati al ruolo admin. Non si assegnano ad altri ruoli e, se un
+ * ruolo li avesse comunque nel DB, non valgono.
+ */
+export const ADMIN_ONLY_CAPABILITIES: readonly string[] = [
+  Capability.CAN_VIEW_TRANSACTIONS,
+  Capability.CAN_MANAGE_TRANSACTIONS,
+  Capability.CAN_VIEW_STATISTICS,
+  Capability.CAN_VIEW_CATEGORIES,
+  Capability.CAN_MANAGE_CATEGORIES,
+  Capability.CAN_MANAGE_BACKUP,
+];
+
+export const isAdminOnlyCapability = (capability: string) => ADMIN_ONLY_CAPABILITIES.includes(capability);
+
+/**
+ * Toglie i permessi riservati all'admin dal ruolo caricato di un utente non admin (modifica l'oggetto): guardie,
+ * login e /auth/me vedono così solo i permessi che valgono davvero.
+ */
+export function restrictRoleCapabilities<T extends { code?: string; capabilities?: { capability: string }[] } | null | undefined>(
+  role: T,
+): T {
+  if (role && role.code !== ADMIN_ROLE_CODE && Array.isArray(role.capabilities)) {
+    role.capabilities = role.capabilities.filter((c) => !isAdminOnlyCapability(c.capability));
+  }
+  return role;
+}
