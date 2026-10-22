@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { dataSource } from '../../../datasources/data-source';
 import { CapabilityPerRole } from './entities/capability-per-role.entity';
-import { Capability, ALL_CAPABILITIES } from './capability.enum';
+import { Capability, ALL_CAPABILITIES, isAdminOnlyCapability } from './capability.enum';
 import { Role } from '../roles/entities/role.entity';
 
 /** Il ruolo admin deve poter sempre gestire utenti, ruoli e permessi: altrimenti nessuno potrebbe più rimediare. */
@@ -11,6 +11,17 @@ const ADMIN_REQUIRED: Capability[] = [
   Capability.CAN_MANAGE_ROLES,
   Capability.CAN_MANAGE_CAPABILITIES,
 ];
+
+/** Movimenti, statistiche, voci di bilancio e backup si danno solo al ruolo admin. */
+function assertNotAdminOnly(roleCode: string, capabilities: string[]): void {
+  if (roleCode === ADMIN_ROLE) return;
+  const reserved = capabilities.filter(isAdminOnlyCapability);
+  if (reserved.length) {
+    throw new BadRequestException(
+      `I permessi su movimenti, statistiche, voci di bilancio e backup sono riservati al ruolo admin (${reserved.join(', ')})`,
+    );
+  }
+}
 
 function assertAdminKeepsManagement(roleCode: string, remaining: Capability[]): void {
   if (roleCode !== ADMIN_ROLE) return;
@@ -65,6 +76,7 @@ export class CapabilitiesPerRoleService {
       throw new BadRequestException(`Capability non valide: ${invalidCapabilities.join(', ')}`);
     }
     assertAdminKeepsManagement(roleCode, capabilities);
+    assertNotAdminOnly(roleCode, capabilities);
 
     // sostituzione tutto o niente: un errore a metà lasciava il ruolo senza permessi
     await this.repo.manager.transaction(async (manager) => {
@@ -89,6 +101,7 @@ export class CapabilitiesPerRoleService {
     if (!ALL_CAPABILITIES.includes(capability)) {
       throw new BadRequestException(`Permesso non valido: ${capability}`);
     }
+    assertNotAdminOnly(roleCode, [capability]);
 
     // Verifica che il ruolo esista
     const role = await this.roleRepo.findOne({ where: { code: roleCode } });

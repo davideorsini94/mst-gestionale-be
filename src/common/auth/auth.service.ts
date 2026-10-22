@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt';
 import { UserService } from '../models/users/user.service';
 import { User } from '../models/users/entities/user.entity';
 import { MIN_PASSWORD_LENGTH } from './password-reset/password-reset.service';
+import { restrictRoleCapabilities } from '../models/capabilities-per-role/capability.enum';
 
 /** Nuova password: obbligatoria e lunga almeno quanto richiesto dal recupero password. */
 function assertNewPassword(newPassword: unknown): asserts newPassword is string {
@@ -48,7 +49,7 @@ export class AuthService {
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
-        role: user.role,
+        role: restrictRoleCapabilities(user.role),
         preferences: user.preferences ?? {},
       },
     };

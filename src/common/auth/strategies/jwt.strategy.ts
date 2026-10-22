@@ -2,6 +2,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';
 import { UserService } from '../../models/users/user.service';
+import { restrictRoleCapabilities } from '../../models/capabilities-per-role/capability.enum';
 
 // solo header Authorization: un token in query finirebbe nei log di nginx e nella cronologia del browser
 // (i PDF si aprono via blob, i backup con un biglietto monouso)
@@ -25,6 +26,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (user.passwordChangedAt && payload.iat && payload.iat * 1000 < new Date(user.passwordChangedAt).getTime() - 1000) {
       return null;
     }
+    // movimenti, statistiche, voci di bilancio e backup: solo per il ruolo admin, qualunque cosa ci sia nel DB
+    restrictRoleCapabilities(user.role);
     return user;
   }
 }

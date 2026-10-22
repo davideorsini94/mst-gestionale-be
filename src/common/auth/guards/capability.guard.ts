@@ -1,7 +1,7 @@
 import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ANY_CAPABILITIES_KEY, CAPABILITIES_KEY } from '../decorators/capabilities.decorator';
-import { Capability } from '../../models/capabilities-per-role/capability.enum';
+import { ADMIN_ROLE_CODE, Capability, isAdminOnlyCapability } from '../../models/capabilities-per-role/capability.enum';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
@@ -40,9 +40,11 @@ export class CapabilityGuard implements CanActivate {
       return false;
     }
 
-    const userCapabilities = user.role.capabilities.map(
-      (cap: any) => cap.capability,
-    );
+    // i permessi sul denaro e sui backup valgono solo per il ruolo admin (anche se un altro ruolo li avesse nel DB)
+    const isAdmin = user.role.code === ADMIN_ROLE_CODE;
+    const userCapabilities = user.role.capabilities
+      .map((cap: any) => cap.capability)
+      .filter((cap: string) => isAdmin || !isAdminOnlyCapability(cap));
 
     if (needsAll && !requiredCapabilities.every((cap) => userCapabilities.includes(cap))) {
       return false;
