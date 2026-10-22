@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { dataSource } from '../../../datasources/data-source';
 import { Role } from './entities/role.entity';
 import { Capability } from '../capabilities-per-role/capability.enum';
@@ -19,12 +19,30 @@ export class RoleService {
   }
 
   async create(role: Partial<Role>): Promise<Role> {
-    const entity = this.repo.create(role);
+    const code = typeof role?.code === 'string' ? role.code.trim() : '';
+    if (!code) {
+      throw new BadRequestException('Il codice del ruolo è obbligatorio');
+    }
+    // save() con una chiave primaria esistente aggiorna invece di creare: un ruolo esistente veniva sovrascritto
+    if (await this.repo.exists({ where: { code } })) {
+      throw new ConflictException(`Esiste già un ruolo con codice "${code}"`);
+    }
+    const entity = this.repo.create({ ...role, code });
     return this.repo.save(entity);
   }
 
+  /** Del ruolo si modifica solo la descrizione (il codice è la chiave, i permessi hanno il loro endpoint). */
   async update(code: string, role: Partial<Role>): Promise<Role> {
-    await this.repo.update({ code }, role);
+    if (!(await this.repo.exists({ where: { code } }))) {
+      throw new NotFoundException(`Ruolo "${code}" inesistente`);
+    }
+    const description = role?.description;
+    if (description !== undefined && description !== null && typeof description !== 'string') {
+      throw new BadRequestException('Descrizione non valida');
+    }
+    if (description !== undefined) {
+      await this.repo.update({ code }, { description: description === null ? null : description.trim() });
+    }
     return this.findByCode(code);
   }
 

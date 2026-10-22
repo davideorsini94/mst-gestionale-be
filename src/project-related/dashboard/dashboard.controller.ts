@@ -6,6 +6,7 @@ import { MemberService } from '../members/member.service';
 import { TransactionService } from '../transactions/transaction.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
+import { calendarRange, toCalendarDay } from '../../common/validators/calendar-date';
 
 @ApiTags('Dashboard')
 @ApiBearerAuth()
@@ -79,17 +80,13 @@ export class DashboardController {
 
     // Scadenze personali dello staff
     const personalExpiries: { field: string; label: string; date: Date }[] = [];
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const futureDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysAhead);
+    // stesse regole dei veicoli: giorni di calendario, oggi e ultimo giorno inclusi
+    const { today, until } = calendarRange(daysAhead);
 
     const checkExpiry = (date: Date | null, field: string, label: string) => {
-      if (date) {
-        const d = new Date(date);
-        const dateOnly = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-        if (dateOnly >= today && dateOnly <= futureDate) {
-          personalExpiries.push({ field, label, date: d });
-        }
+      const day = toCalendarDay(date);
+      if (day && day >= today && day <= until) {
+        personalExpiries.push({ field, label, date });
       }
     };
 

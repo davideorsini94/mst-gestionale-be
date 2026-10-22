@@ -50,9 +50,13 @@ export class CapabilitiesPerRoleService {
     });
 
     if (!role) {
-      throw new NotFoundException(`Role ${roleCode} not found`);
+      throw new NotFoundException(`Ruolo "${roleCode}" inesistente`);
     }
 
+    if (!Array.isArray(capabilities) || capabilities.some((cap) => typeof cap !== 'string')) {
+      throw new BadRequestException('Elenco dei permessi non valido');
+    }
+    capabilities = Array.from(new Set(capabilities));
     // Valida che tutte le capabilities siano valide
     const invalidCapabilities = capabilities.filter(
       (cap) => !ALL_CAPABILITIES.includes(cap),
@@ -62,17 +66,13 @@ export class CapabilitiesPerRoleService {
     }
     assertAdminKeepsManagement(roleCode, capabilities);
 
-    // Elimina le capabilities esistenti per questo ruolo
-    await this.repo.delete({ roleCode });
-
-    // Crea le nuove capabilities
-    for (const capability of capabilities) {
-      const entity = this.repo.create({
-        roleCode,
-        capability,
-      });
-      await this.repo.save(entity);
-    }
+    // sostituzione tutto o niente: un errore a metà lasciava il ruolo senza permessi
+    await this.repo.manager.transaction(async (manager) => {
+      await manager.delete(CapabilityPerRole, { roleCode });
+      for (const capability of capabilities) {
+        await manager.save(manager.create(CapabilityPerRole, { roleCode, capability }));
+      }
+    });
 
     // Ritorna il ruolo aggiornato
     return this.roleRepo.findOne({
@@ -87,13 +87,13 @@ export class CapabilitiesPerRoleService {
   ): Promise<CapabilityPerRole> {
     // Verifica che la capability sia valida
     if (!ALL_CAPABILITIES.includes(capability)) {
-      throw new Error(`Invalid capability: ${capability}`);
+      throw new BadRequestException(`Permesso non valido: ${capability}`);
     }
 
     // Verifica che il ruolo esista
     const role = await this.roleRepo.findOne({ where: { code: roleCode } });
     if (!role) {
-      throw new NotFoundException(`Role ${roleCode} not found`);
+      throw new NotFoundException(`Ruolo "${roleCode}" inesistente`);
     }
 
     // Verifica che la capability non sia già assegnata

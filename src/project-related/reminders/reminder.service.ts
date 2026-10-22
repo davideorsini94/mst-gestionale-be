@@ -11,6 +11,7 @@ import { VehicleService } from '../vehicles/vehicle.service';
 import { Staff } from '../staff/entities/staff.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { SettingsService } from '../settings/settings.service';
+import { toCalendarDay } from '../../common/validators/calendar-date';
 
 interface ReminderConfig {
   type: ReminderType;
@@ -55,9 +56,14 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     return process.env.REMINDER_CRON || CronExpression.EVERY_DAY_AT_8AM;
   }
 
+  /** Promemoria automatici attivi solo con REMINDER_ENABLED=true (variabile d'ambiente del backend). */
+  isEnabled(): boolean {
+    return process.env.REMINDER_ENABLED === 'true';
+  }
+
   @Cron(CronExpression.EVERY_DAY_AT_8AM)
   async checkAndScheduleReminders() {
-    if (process.env.REMINDER_ENABLED !== 'true') {
+    if (!this.isEnabled()) {
       return;
     }
 
@@ -163,6 +169,22 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     return adminEmailSetting?.value || process.env.ADMIN_EMAIL || null;
   }
 
+  /** Scadenze personali dello staff: email alla persona con l'admin in CC (o solo all'admin se manca l'email). */
+  private isStaffReminder(type: ReminderType): boolean {
+    return [
+      ReminderType.MEDICAL_CERTIFICATE,
+      ReminderType.DRIVING_LICENSE,
+      ReminderType.SKI_INSTRUCTOR_LICENSE,
+      ReminderType.COACH_LICENSE,
+    ].includes(type);
+  }
+
+  /** Admin in CC solo se è un indirizzo diverso dal destinatario. */
+  private ccFor(recipient: string | null, adminEmail: string | null): string | null {
+    if (!recipient || !adminEmail) return null;
+    return recipient.trim().toLowerCase() === adminEmail.trim().toLowerCase() ? null : adminEmail;
+  }
+
   private isVehicleReminder(type: ReminderType): boolean {
     return [
       ReminderType.VEHICLE_TAX,
@@ -186,8 +208,9 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const expiryDateObj = new Date(expiryDate);
-    expiryDateObj.setHours(0, 0, 0, 0);
+    // 'AAAA-MM-GG' come giorno di calendario locale (new Date() lo leggerebbe come mezzanotte UTC)
+    const expiryDateObj = toCalendarDay(expiryDate);
+    if (!expiryDateObj) return;
 
     const scheduledSendDate = new Date(expiryDateObj);
     scheduledSendDate.setDate(scheduledSendDate.getDate() - daysBeforeExpiry);
@@ -217,11 +240,13 @@ export class ReminderService extends BaseService<Reminder, any, any> {
           if (!email) {
             // Se lo staff non ha email, invia solo all'admin
             email = adminEmail;
+          } else if (this.isStaffReminder(type)) {
+            ccEmail = this.ccFor(email, adminEmail);
           }
         }
 
         if (!email) {
-          this.logger.warn(`[ReminderService] No email for reminder ${description}`, { type });
+          this.logger.warn(`[ReminderService] No email for reminder ${entityType} ${entityUuid}`, { type });
           return;
         }
 
@@ -238,7 +263,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
         reminder.subjectDescription = description;
 
         await this.repo.save(reminder);
-        this.logger.info(`[ReminderService] Created reminder for ${description}`, { type, expiryDate });
+        this.logger.info(`[ReminderService] Created reminder for ${entityType} ${entityUuid}`, { type, expiryDate });
       }
     }
   }
@@ -281,8 +306,6 @@ export class ReminderService extends BaseService<Reminder, any, any> {
       this.logger.info(`[ReminderService] Reminder sent successfully`, {
         uuid: reminder.uuid,
         type: reminder.type,
-        recipient: reminder.recipientEmail,
-        cc: reminder.ccEmail,
       });
     } catch (error) {
       reminder.status = ReminderStatus.FAILED;
@@ -318,6 +341,9 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     const reminder = await this.findByUuid(uuid);
     if (!reminder) {
       throw new NotFoundException('Reminder non trovato');
+    }
+    if (reminder.status === ReminderStatus.CANCELLED) {
+      throw new BadRequestException('Questo promemoria è stato annullato: non viene reinviato');
     }
     if (!(await this.subjectExists(reminder))) {
       throw new BadRequestException('Il soggetto di questo reminder è stato eliminato: non viene reinviato');
@@ -404,11 +430,22 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     }
 
     const daysBeforeExpiry = this.getDaysBeforeExpiry(type);
-    const expiryDateObj = new Date(expiryDate);
-    expiryDateObj.setHours(0, 0, 0, 0);
+    const expiryDateObj = toCalendarDay(expiryDate);
+    if (!expiryDateObj) return null;
 
     const scheduledSendDate = new Date(expiryDateObj);
     scheduledSendDate.setDate(scheduledSendDate.getDate() - daysBeforeExpiry);
+
+    // scadenza già passata: nessun avviso "in scadenza" (come nel controllo giornaliero), si annulla quello programmato
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (expiryDateObj < today) {
+      await this.repo.update(
+        { type, subjectEntityUuid: entityUuid, status: ReminderStatus.SCHEDULED },
+        { status: ReminderStatus.CANCELLED },
+      );
+      return null;
+    }
 
     // Cerca reminder esistente programmato per questa entità e tipo
     const existingScheduledReminder = await this.repo.findOne({
@@ -436,10 +473,13 @@ export class ReminderService extends BaseService<Reminder, any, any> {
       }
     } else if (!email) {
       email = adminEmail;
+    } else if (this.isStaffReminder(type)) {
+      // Staff con email: la riceve lui, l'admin (ADMIN_EMAIL o impostazione adminEmail) in CC
+      cc = this.ccFor(email, adminEmail);
     }
 
     if (!email) {
-      this.logger.warn(`[ReminderService] No email for reminder ${description}`, { type });
+      this.logger.warn(`[ReminderService] No email for reminder ${entityType} ${entityUuid}`, { type });
       return null;
     }
 
@@ -453,7 +493,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
       existingScheduledReminder.subjectDescription = description;
 
       await this.repo.save(existingScheduledReminder);
-      this.logger.info(`[ReminderService] Updated reminder for ${description}`, { type, expiryDate });
+      this.logger.info(`[ReminderService] Updated reminder for ${entityType} ${entityUuid}`, { type, expiryDate });
       return existingScheduledReminder;
     }
 
@@ -469,7 +509,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
 
     // Se esiste già un reminder inviato per questa esatta scadenza, non crearne un altro
     if (existingSentReminder) {
-      this.logger.info(`[ReminderService] Reminder already sent for ${description}`, { type, expiryDate });
+      this.logger.info(`[ReminderService] Reminder already sent for ${entityType} ${entityUuid}`, { type, expiryDate });
       return null;
     }
 
@@ -487,7 +527,7 @@ export class ReminderService extends BaseService<Reminder, any, any> {
     reminder.subjectDescription = description;
 
     await this.repo.save(reminder);
-    this.logger.info(`[ReminderService] Created reminder for ${description}`, { type, expiryDate });
+    this.logger.info(`[ReminderService] Created reminder for ${entityType} ${entityUuid}`, { type, expiryDate });
     return reminder;
   }
 

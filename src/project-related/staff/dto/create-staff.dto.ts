@@ -1,15 +1,19 @@
-import { IsString, IsOptional, IsEmail, IsEnum, IsDateString, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsEmail, Matches, ValidateIf, IsEnum, IsBoolean, IsUUID } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { BaseSaveDto } from '../../../common/base-crud/base-save.dto';
+import { IsCalendarDate } from '../../../common/validators/calendar-date';
+import { hasEmailValue } from '../../../common/validators/person-fields';
 import { StaffRole, StaffStatus, Gender, CoachLevel } from '../entities/staff.entity';
 
 export class CreateStaffDto extends BaseSaveDto {
   @ApiProperty()
-  @IsString()
+  @IsString({ message: 'Il nome è obbligatorio' })
+  @Matches(/\S/, { message: 'Il nome è obbligatorio' })
   firstName: string;
 
   @ApiProperty()
-  @IsString()
+  @IsString({ message: 'Il cognome è obbligatorio' })
+  @Matches(/\S/, { message: 'Il cognome è obbligatorio' })
   lastName: string;
 
   @ApiProperty({ enum: Gender, required: false })
@@ -22,10 +26,11 @@ export class CreateStaffDto extends BaseSaveDto {
   @IsString()
   fiscalCode?: string;
 
-  @ApiProperty({ required: false })
-  @IsOptional()
-  @IsEmail()
-  email?: string;
+  // "" o null tolgono l'email (salvata come null): si valida solo un indirizzo effettivamente inserito
+  @ApiProperty({ required: false, nullable: true })
+  @ValidateIf(hasEmailValue)
+  @IsEmail({}, { message: 'Indirizzo email non valido' })
+  email?: string | null;
 
   @ApiProperty({ required: false })
   @IsOptional()
@@ -49,7 +54,7 @@ export class CreateStaffDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   birthDate?: string;
 
   @ApiProperty({ required: false })
@@ -69,12 +74,12 @@ export class CreateStaffDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   hireDate?: string;
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   endDate?: string;
 
   @ApiProperty({ required: false })
@@ -99,7 +104,7 @@ export class CreateStaffDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   drivingLicenseExpiry?: string;
 
   @ApiProperty({ required: false })
@@ -109,7 +114,7 @@ export class CreateStaffDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   skiInstructorLicenseExpiry?: string;
 
   @ApiProperty({ required: false })
@@ -119,7 +124,7 @@ export class CreateStaffDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   firstAidCertificateExpiry?: string;
 
   // Abilitazione Allenatore
@@ -128,21 +133,28 @@ export class CreateStaffDto extends BaseSaveDto {
   @IsBoolean()
   isCoach?: boolean;
 
-  @ApiProperty({ enum: CoachLevel, required: false })
-  @IsOptional()
-  @IsEnum(CoachLevel)
-  coachLevel?: CoachLevel;
+  // null (o "") esplicito = nessun livello: il servizio lo salva come NULL
+  @ApiProperty({ enum: CoachLevel, required: false, nullable: true })
+  @ValidateIf((o) => o.coachLevel !== null && o.coachLevel !== undefined && o.coachLevel !== '')
+  @IsEnum(CoachLevel, { message: 'Livello allenatore non valido' })
+  coachLevel?: CoachLevel | null;
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   coachLicenseExpiry?: string;
 
   // Visita medica sportiva
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsDateString()
+  @IsCalendarDate()
   medicalExamExpiry?: string;
+
+  // Utente collegato (login): null (o "") esplicito scollega il profilo
+  @ApiProperty({ required: false, nullable: true })
+  @ValidateIf((o) => o.linkedUserUuid !== null && o.linkedUserUuid !== undefined && o.linkedUserUuid !== '')
+  @IsUUID('all', { message: 'Utente collegato non valido' })
+  linkedUserUuid?: string | null;
 
   // Foto profilo
   @ApiProperty({ required: false })

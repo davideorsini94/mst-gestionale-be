@@ -32,8 +32,22 @@ export function decodeText(buffer: Buffer): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
   } catch {
-    return new TextDecoder('windows-1252').decode(buffer);
+    return decodeWindows1252(buffer);
   }
+}
+
+/** 0x80–0x9F di windows-1252 (€, ’, “ ” …): alcune versioni di Node li decodificano come latin1 (caratteri di controllo). */
+const CP1252_HIGH: Record<number, number> = {
+  0x80: 0x20ac, 0x82: 0x201a, 0x83: 0x0192, 0x84: 0x201e, 0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021, 0x88: 0x02c6,
+  0x89: 0x2030, 0x8a: 0x0160, 0x8b: 0x2039, 0x8c: 0x0152, 0x8e: 0x017d, 0x91: 0x2018, 0x92: 0x2019, 0x93: 0x201c,
+  0x94: 0x201d, 0x95: 0x2022, 0x96: 0x2013, 0x97: 0x2014, 0x98: 0x02dc, 0x99: 0x2122, 0x9a: 0x0161, 0x9b: 0x203a,
+  0x9c: 0x0153, 0x9e: 0x017e, 0x9f: 0x0178,
+};
+
+export function decodeWindows1252(buffer: Buffer): string {
+  let out = '';
+  for (const byte of buffer) out += String.fromCharCode(CP1252_HIGH[byte] ?? byte);
+  return out;
 }
 
 /**
@@ -70,8 +84,10 @@ export function readFirstSheet(buffer: Buffer): SheetData {
 
 export class DateParseError extends Error {}
 
-function buildDate(y: number, m: number, d: number, original: unknown): string {
-  if (y < 100) y += y >= 70 ? 1900 : 2000;
+function buildDate(y: number, m: number, d: number, original: unknown, twoDigitYear = false): string {
+  // solo un anno scritto con due cifre ("24") si completa; "0099" resta l'anno 99 (e viene rifiutato sotto)
+  if (twoDigitYear) y += y >= 70 ? 1900 : 2000;
+  if (y < 1900 || y > 2199) throw new DateParseError(`Data non valida: ${original} (anno fuori dall'intervallo 1900-2199)`);
   const date = new Date(Date.UTC(y, m - 1, d));
   if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) {
     throw new DateParseError(`Data non valida: ${original}`);
@@ -96,7 +112,7 @@ export function parseDateCell(value: unknown, date1904 = false): string {
 
   // GG/MM/AAAA, GG/MM/AA, GG.MM.AAAA, GG-MM-AAAA (eventuale orario ignorato)
   let match = str.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})(?:[ T].*)?$/);
-  if (match) return buildDate(Number(match[3]), Number(match[2]), Number(match[1]), value);
+  if (match) return buildDate(Number(match[3]), Number(match[2]), Number(match[1]), value, match[3].length === 2);
 
   // AAAA-MM-GG (ISO, eventuale orario ignorato)
   match = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?$/);

@@ -8,6 +8,9 @@ import { dataSource } from '../../datasources/data-source';
 import { FileService } from '../../common/files/file.service';
 import { ReminderService } from '../reminders/reminder.service';
 import { blindIndex } from '../../common/crypto/field-crypto';
+import { assertUniqueFiscalCode, normalizePersonFields } from '../../common/validators/person-fields';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { PROFILE_IMAGE_TYPES } from '../../common/files/file-types';
 
 @Injectable()
 export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaffDto> {
@@ -25,9 +28,10 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   async delete(uuid: string): Promise<Staff> {
     const staff = await this.repo.findOne({ where: { uuid }, relations: ['documents'] });
     if (!staff) {
-      throw new NotFoundException(`Staff with uuid ${uuid} not found`);
+      throw new NotFoundException('Membro dello staff non trovato');
     }
     const fileUuids = [staff.profileImageUuid, ...staff.documents.map((d) => d.fileUuid)].filter(Boolean);
+    const vehicles = await this.assignedVehicles(uuid);
     // tutto o niente: veicoli e tesserati collegati hanno un vincolo verso staff (senza scollegarli: errore 500)
     await dataSource.transaction(async (manager) => {
       await manager.query(`UPDATE vehicles SET "assignedStaffUuid" = NULL WHERE "assignedStaffUuid" = $1`, [uuid]);
@@ -35,6 +39,10 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
       await manager.query(`DELETE FROM staff WHERE uuid = $1`, [uuid]);
     });
     await this.reminderService.cancelRemindersForEntity(uuid);
+    // i promemoria dei veicoli che aveva in carico tornano all'admin
+    for (const vehicle of vehicles) {
+      await this.reminderService.updateVehicleReminders({ ...vehicle, assignedStaffUuid: null });
+    }
     await this.fileService.deleteFilesQuietly(fileUuids);
     return staff;
   }
@@ -44,15 +52,52 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   }
 
   async create(dto: CreateStaffDto): Promise<Staff> {
+    await this.prepareDto(dto, null);
     const staff = await super.create(dto);
     await this.reminderService.updateStaffReminders(staff);
     return staff;
   }
 
   async update(uuid: string, dto: UpdateStaffDto): Promise<Staff> {
+    await this.prepareDto(dto, uuid);
     const staff = await super.update(uuid, dto);
     await this.reminderService.updateStaffReminders(staff);
+    // email o nome cambiati: anche i promemoria dei veicoli assegnati vanno al nuovo indirizzo
+    for (const vehicle of await this.assignedVehicles(uuid)) {
+      await this.reminderService.updateVehicleReminders(vehicle);
+    }
     return staff;
+  }
+
+  private assignedVehicles(staffUuid: string): Promise<Vehicle[]> {
+    return dataSource.getRepository(Vehicle).find({ where: { assignedStaffUuid: staffUuid } });
+  }
+
+  /**
+   * Normalizza e controlla i dati prima del salvataggio. I campi azzerabili (livello allenatore, utente collegato)
+   * arrivano come null esplicito: restano nel dto e il salvataggio li scrive come NULL (un campo assente invece
+   * lascia il valore precedente).
+   */
+  private async prepareDto(dto: CreateStaffDto | UpdateStaffDto, uuid: string | null): Promise<void> {
+    normalizePersonFields(dto as Record<string, any>);
+    for (const field of ['coachLevel', 'linkedUserUuid'] as const) {
+      if (field in dto && (dto as any)[field] === '') (dto as any)[field] = null;
+    }
+    if (dto.fiscalCode) {
+      await assertUniqueFiscalCode(this.repo, dto.fiscalCode, uuid, 'un membro dello staff');
+    }
+    if (dto.linkedUserUuid) {
+      const [user] = await this.repo.query(`SELECT 1 FROM users WHERE uuid = $1`, [dto.linkedUserUuid]);
+      if (!user) {
+        // collegamento rimasto da un utente cancellato in passato: la scheda rimanda il valore salvato, si azzera
+        const [current] = uuid ? await this.repo.query(`SELECT "linkedUserUuid" FROM staff WHERE uuid = $1`, [uuid]) : [];
+        if (current?.linkedUserUuid && String(current.linkedUserUuid).toLowerCase() === String(dto.linkedUserUuid).toLowerCase()) {
+          dto.linkedUserUuid = null;
+        } else {
+          throw new BadRequestException('Utente collegato inesistente');
+        }
+      }
+    }
   }
 
   async findByEmail(email: string): Promise<Staff | null> {
@@ -73,7 +118,7 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
       relations: ['documents'],
     });
     if (!staff) {
-      throw new NotFoundException(`Staff with uuid ${uuid} not found`);
+      throw new NotFoundException('Membro dello staff non trovato');
     }
     
     // Carica manualmente il file della foto profilo
@@ -101,7 +146,7 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   ): Promise<StaffDocument> {
     const staff = await this.findByUuid(staffUuid);
     if (!staff) {
-      throw new NotFoundException(`Staff with uuid ${staffUuid} not found`);
+      throw new NotFoundException('Membro dello staff non trovato');
     }
 
     // Struttura: staff/{uuid}/documents/{tipo}
@@ -148,7 +193,7 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   async getDocumentStaffUuid(documentUuid: string): Promise<string> {
     const document = await this.documentRepository.findOne({ where: { uuid: documentUuid } });
     if (!document) {
-      throw new NotFoundException(`Document with uuid ${documentUuid} not found`);
+      throw new NotFoundException('Documento non trovato');
     }
     return document.staffUuid;
   }
@@ -158,7 +203,7 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
       where: { uuid: documentUuid },
     });
     if (!document) {
-      throw new NotFoundException(`Document with uuid ${documentUuid} not found`);
+      throw new NotFoundException('Documento non trovato');
     }
     
     const fileUuid = document.fileUuid;
@@ -183,7 +228,7 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
   async deleteProfileImage(staffUuid: string): Promise<Staff> {
     const staff = await this.findByUuid(staffUuid);
     if (!staff) {
-      throw new NotFoundException(`Staff with uuid ${staffUuid} not found`);
+      throw new NotFoundException('Membro dello staff non trovato');
     }
 
     if (!staff.profileImageUuid) {
@@ -205,13 +250,16 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
     // 3. Elimina il record file dal DB
     await this.fileService.deleteFileRecord(fileUuid);
 
-    return savedStaff;
+    return this.stripSecrets(savedStaff);
   }
 
   async uploadProfileImage(staffUuid: string, file: { filename: string; buffer: Buffer; mimetype: string }): Promise<Staff> {
+    if (!PROFILE_IMAGE_TYPES.includes(String(file?.mimetype ?? '').toLowerCase())) {
+      throw new BadRequestException('La foto profilo deve essere un\'immagine JPG, PNG, WEBP, GIF o HEIC');
+    }
     const staff = await this.findByUuid(staffUuid);
     if (!staff) {
-      throw new NotFoundException(`Staff with uuid ${staffUuid} not found`);
+      throw new NotFoundException('Membro dello staff non trovato');
     }
 
     const oldProfileImageUuid = staff.profileImageUuid;
@@ -237,6 +285,6 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
       await this.fileService.deleteFileRecord(oldProfileImageUuid);
     }
     
-    return savedStaff;
+    return this.stripSecrets(savedStaff);
   }
 }

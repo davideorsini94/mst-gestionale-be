@@ -1,4 +1,4 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { TransactionService } from './transaction.service';
 import { AmountReviewStatus, Transaction, TransactionType, PaymentMethod } from './entities/transaction.entity';
 import { CategoryService } from '../categories/category.service';
@@ -63,6 +63,14 @@ for (const [key, aliases] of Object.entries(COLUMN_ALIASES)) {
   for (const alias of aliases) ALIAS_TO_KEY.set(alias, key);
 }
 
+const MAX_AMOUNT = 99_999_999.99;
+
+/** Valori della colonna Tipo: maiuscolo, senza accenti e senza punto finale ("Usc." → "USC"). */
+const normalizeTypeWord = (value: string) =>
+  value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\.$/, '').toUpperCase();
+const INCOME_WORDS = new Set(['ENTRATA', 'ENTRATE', 'INCOME', 'E', '+', 'ENTR', 'INCASSO', 'INCASSI', 'RICAVO', 'RICAVI']);
+const EXPENSE_WORDS = new Set(['USCITA', 'USCITE', 'EXPENSE', 'U', '-', 'USC', 'SPESA', 'SPESE', 'COSTO', 'COSTI']);
+
 @Injectable()
 export class ExcelImportService {
   constructor(
@@ -86,7 +94,15 @@ export class ExcelImportService {
   }
 
   private async runImport(buffer: Buffer, _filename?: string): Promise<ImportResult> {
-    const { rows: allRows, date1904 } = readFirstSheet(buffer);
+    let sheet: ReturnType<typeof readFirstSheet>;
+    try {
+      sheet = readFirstSheet(buffer);
+    } catch (error) {
+      // file corrotto o non un foglio di calcolo: prima diventava un errore 500
+      console.error('[ExcelImportService] File non leggibile:', error?.message ?? error);
+      throw new BadRequestException('File non leggibile: usa un file Excel (.xlsx, .xls) o CSV valido');
+    }
+    const { rows: allRows, date1904 } = sheet;
     const result: ImportResult = { imported: 0, updated: 0, corrected: 0, errors: [] };
 
     const headerRowIndex = this.findHeaderRow(allRows);
@@ -102,6 +118,15 @@ export class ExcelImportService {
         if (key && cell && !(key in row)) row[key] = cell;
       });
       if (this.hasValidData(row)) rows.push({ row, rowNumber: i + 1 });
+    }
+
+    // Nessuna riga con data o importo (es. un PDF rinominato, un foglio senza intestazioni riconosciute): meglio dirlo
+    // che rispondere "0 importati, nessun errore"
+    if (rows.length === 0) {
+      throw new BadRequestException(
+        'Nessun movimento riconosciuto nel file: servono le colonne "Data" e "Importo" (oppure "Entrate"/"Uscite") ' +
+          'nella riga di intestazione',
+      );
     }
 
     // Separatore decimale di ogni colonna importo dedotto dai valori non ambigui (risolve "1.234" vs "1,234")
@@ -121,17 +146,33 @@ export class ExcelImportService {
       }
     }
 
-    // Inverti l'ordine delle righe: le righe dal basso dell'Excel vengono inserite prima
-    // così le righe in alto avranno created_at più recente
+    // Abbinamento alle righe esistenti nello stesso ordine di sempre (dal basso del file verso l'alto): la logica di
+    // abbinamento, comprese le righe rovinate dal vecchio import, non cambia
     parsed.reverse();
 
     // Righe identiche nello stesso file sono movimenti distinti: la k-esima occorrenza si abbina alla k-esima
     // riga esistente, mai la stessa riga due volte
     const usedUuids = new Set<string>();
+    const toCreate: ParsedRow[] = [];
     for (const item of parsed) {
       try {
         const outcome = await this.upsert(item, usedUuids);
-        result[outcome]++;
+        if (outcome === 'create') toCreate.push(item);
+        else result[outcome]++;
+      } catch (error) {
+        result.errors.push({ row: item.rowNumber, error: error.message || 'Errore sconosciuto' });
+      }
+    }
+
+    // Le righe nuove si creano dopo, in ordine di data crescente (a parità di data, nell'ordine del file): le
+    // ricevute vengono numerate in ordine cronologico. Prima si creavano dal fondo del file e un file in ordine
+    // di data aveva le ricevute numerate al contrario. Rimandare la creazione non cambia gli abbinamenti: le righe
+    // appena create erano comunque escluse (usedUuids) dagli abbinamenti successivi.
+    toCreate.sort((a, b) => String(a.transaction.date).localeCompare(String(b.transaction.date)) || a.rowNumber - b.rowNumber);
+    for (const item of toCreate) {
+      try {
+        await this.transactionService.createTransaction(item.transaction as any);
+        result.imported++;
       } catch (error) {
         result.errors.push({ row: item.rowNumber, error: error.message || 'Errore sconosciuto' });
       }
@@ -155,7 +196,8 @@ export class ExcelImportService {
     return 0;
   }
 
-  private async upsert(item: ParsedRow, usedUuids: Set<string>): Promise<'imported' | 'updated' | 'corrected'> {
+  /** Aggiorna la riga esistente abbinata; 'create' = nessun abbinamento, la riga va creata (dopo, in ordine di data). */
+  private async upsert(item: ParsedRow, usedUuids: Set<string>): Promise<'create' | 'updated' | 'corrected'> {
     const tx = item.transaction;
     const subjectHash = blindIndex(tx.subject ?? null, 'exact');
 
@@ -167,10 +209,7 @@ export class ExcelImportService {
     }
 
     if (!existing) {
-      const created = await this.transactionService.createTransaction(tx as any);
-      // una riga identica più avanti nello stesso file è un altro movimento: non deve abbinarsi a questa
-      usedUuids.add(created.uuid);
-      return 'imported';
+      return 'create';
     }
     usedUuids.add(existing.uuid);
 
@@ -184,8 +223,14 @@ export class ExcelImportService {
       update.amountReviewedAt = new Date();
     }
 
-    if (tx.type === TransactionType.INCOME && amountChanged) {
-      // La ricevuta riporta l'importo: va rigenerata (stesso numero)
+    // La ricevuta riporta importo, soggetto, note e metodo di pagamento: se cambiano va rigenerata (stesso numero)
+    const same = (a: unknown, b: unknown) => (a ?? '') === (b ?? '');
+    const receiptChanged =
+      amountChanged ||
+      ('subject' in tx && !same(tx.subject, existing.subject)) ||
+      ('notes' in tx && !same(tx.notes, existing.notes)) ||
+      ('paymentMethod' in tx && !same(tx.paymentMethod, existing.paymentMethod));
+    if (tx.type === TransactionType.INCOME && receiptChanged) {
       await this.transactionService.updateTransaction(existing.uuid, update as any);
     } else {
       await this.transactionService.update(existing.uuid, update as any);
@@ -287,19 +332,33 @@ export class ExcelImportService {
       throw new Error(`Importo negativo nella colonna ${hasIncome ? 'Entrate' : 'Uscite'}: usa l'altra colonna o correggi il file`);
     }
     transaction.amount = Math.abs(importoValue);
+    if (transaction.amount > MAX_AMOUNT) {
+      throw new Error('Importo troppo grande (massimo 99.999.999,99)');
+    }
 
     const tipo = this.cellText(row.tipo);
     const tipoUpper = tipo?.toUpperCase();
+    const tipoWord = tipo ? normalizeTypeWord(tipo) : '';
 
     // Se il tipo non è già stato determinato dalle colonne entrate/uscite
     if (!transaction.type) {
-      if (tipoUpper === 'ENTRATA' || tipoUpper === 'INCOME' || tipoUpper === 'E' || tipoUpper === '+') {
-        transaction.type = TransactionType.INCOME;
-      } else if (tipoUpper === 'USCITA' || tipoUpper === 'EXPENSE' || tipoUpper === 'U' || tipoUpper === '-') {
-        transaction.type = TransactionType.EXPENSE;
-      } else {
+      const explicit = INCOME_WORDS.has(tipoWord)
+        ? TransactionType.INCOME
+        : EXPENSE_WORDS.has(tipoWord)
+          ? TransactionType.EXPENSE
+          : null;
+      if (explicit) {
+        // "ENTRATA" con importo negativo: il segno contraddice il tipo (prima si perdeva e nasceva una ricevuta)
+        if (importoValue < 0) {
+          throw new Error(`Importo negativo con Tipo "${tipo}": correggi il segno o il tipo`);
+        }
+        transaction.type = explicit;
+      } else if (!tipo || PAYMENT_METHOD_WORDS.includes(tipoUpper)) {
         // Determina dal segno dell'importo (anche quando "tipo" è un metodo di pagamento)
         transaction.type = importoValue >= 0 ? TransactionType.INCOME : TransactionType.EXPENSE;
+      } else {
+        // un tipo sconosciuto ("Spesa rimborsata", "xyz") diventava un'entrata con ricevuta
+        throw new Error(`Tipo non riconosciuto: "${tipo}" (usa ENTRATA o USCITA)`);
       }
     }
 
@@ -311,6 +370,9 @@ export class ExcelImportService {
     // Importo originale (opzionale)
     if (row.importo_originale && !this.isZeroOrEmpty(row.importo_originale, hints.importo_originale)) {
       transaction.originalAmount = parseAmountCell(row.importo_originale.v, hints.importo_originale);
+      if (transaction.originalAmount < 0 || transaction.originalAmount > MAX_AMOUNT) {
+        throw new Error('Importo originale non valido (deve essere positivo e al massimo 99.999.999,99)');
+      }
     }
 
     const text = (key: string) => this.cellText(row[key]);

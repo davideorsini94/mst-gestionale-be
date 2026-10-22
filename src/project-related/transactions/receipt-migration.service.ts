@@ -33,21 +33,21 @@ export class ReceiptMigrationService {
       const expectedPathPrefix = `ricevute/${transaction.receiptYear}/`;
 
       if (currentPath.startsWith(expectedPathPrefix)) {
-        console.log(`[Migration] Transaction ${transaction.uuid} already in correct folder: ${currentPath}`);
+        console.log(`[Migration] Transaction ${transaction.uuid} already in correct folder`);
         continue;
       }
 
       try {
         const fileExists = await this.minioService.fileExists(currentPath);
         if (!fileExists) {
-          console.log(`[Migration] File not found for transaction ${transaction.uuid}: ${currentPath}`);
+          console.log(`[Migration] File not found for transaction ${transaction.uuid}`);
           continue;
         }
 
         const filename = currentPath.split('/').pop();
         const newPath = `ricevute/${transaction.receiptYear}/${filename}`;
 
-        console.log(`[Migration] Moving ${currentPath} -> ${newPath}`);
+        console.log(`[Migration] Moving receipt of transaction ${transaction.uuid}`);
 
         const movedPath = await this.minioService.moveFile(currentPath, newPath);
 

@@ -1,47 +1,29 @@
-## Usa un'immagine di base che include Python 3.10
-#FROM python:3.10-slim
-FROM ubuntu:24.04
-
-# Installa Node.js 22
-RUN apt-get update && apt-get install -y curl gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Google Chrome Stable and fonts
-# Note: this installs the necessary libs to make the browser work with Puppeteer.
-RUN apt-get update && apt-get install gnupg wget -y && \
-  wget --quiet --output-document=- https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /etc/apt/trusted.gpg.d/google-archive.gpg && \
-  sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' && \
-  apt-get update && \
-  apt-get install google-chrome-stable -y --no-install-recommends && \
-  rm -rf /var/lib/apt/lists/*
-  
- RUN apt-get update && apt-get install ffmpeg libsm6 libxext6 -y
- RUN apt-get update && apt-get install -y libgcc-s1 libstdc++6 python3 gcc g++ make
-
-# pg_dump / pg_restore per backup e ripristino dalle Impostazioni (Ubuntu 24.04 = client PostgreSQL 16, come il server)
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 && rm -rf /var/lib/apt/lists/*
-
-# Imposta la directory di lavoro su suis-catalog all'interno del container
+# Build: dipendenze dal package-lock (npm ci, build riproducibili), compilazione, poi solo dipendenze di produzione.
+# Nessun compilatore: l'unica dipendenza nativa (bcrypt) ha i binari precompilati per linux-x64.
+FROM node:22-bookworm-slim AS build
 WORKDIR /mst-gestionale-be
+ENV SCARF_ANALYTICS=false
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 
-# Copia i file Python e Node.js necessari nella directory di lavoro
-COPY package.json /mst-gestionale-be/
+# Esecuzione: Ubuntu 24.04 per pg_dump / pg_restore 16 (backup e ripristino dalle Impostazioni, stessa versione del
+# server Postgres). Niente Chrome, ffmpeg, python o gcc: i PDF si generano con pdfkit.
+FROM ubuntu:24.04
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client-16 ca-certificates tzdata \
+  && rm -rf /var/lib/apt/lists/*
+# solo l'eseguibile di node (npm non serve a runtime)
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
 
-# Copia il resto del codice nella directory di lavoro
-COPY . /mst-gestionale-be
-RUN rm -rf ./dist
-#RUN rm -rf ./node_modules
-#RUN sh node_install_and_build.sh
-RUN npm install
-RUN npm run build
-RUN rm -rf ./src
-RUN rm -rf ./.github
+WORKDIR /mst-gestionale-be
+COPY --from=build /mst-gestionale-be/package.json ./
+COPY --from=build /mst-gestionale-be/node_modules ./node_modules
+COPY --from=build /mst-gestionale-be/dist ./dist
 
 # In produzione nessun file .env viene letto (vedi src/main.ts): le variabili arrivano dall'ambiente del container
 ENV NODE_ENV=production
 
 # Esegui l'applicazione all'avvio del container
 CMD ["node", "./dist/main"]
-

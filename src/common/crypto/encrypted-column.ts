@@ -46,22 +46,43 @@ export function aadFor(target: Function, column: string): string {
   return `${resolveTableName(target)}.${column}`;
 }
 
-/** Converte una data in arrivo (Date, 'YYYY-MM-DD', ISO) nella stringa 'YYYY-MM-DD' che restituiva la colonna date. */
+/** Anni accettati: il formato 'YYYY-MM-DD' ne prevede 4 cifre (niente anni negativi o a 5 cifre). */
+const MIN_YEAR = 1;
+const MAX_YEAR = 9999;
+
+/** 'YYYY-MM-DD' solo se la data esiste davvero (niente 30 febbraio o mese 13). */
+function validDateOnly(y: number, m: number, d: number): string | null {
+  if (y < MIN_YEAR || y > MAX_YEAR || m < 1 || m > 12 || d < 1) return null;
+  // giorni del mese calcolati in UTC: indipendente dal fuso del server
+  const daysInMonth = new Date(Date.UTC(2000, m, 0)).getUTCDate();
+  const leapFix = m === 2 && !(y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0)) ? 1 : 0;
+  if (d > daysInMonth - leapFix) return null;
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/**
+ * Converte una data in arrivo (Date, 'YYYY-MM-DD', ISO) nella stringa 'YYYY-MM-DD' che restituiva la colonna date.
+ * Una data impossibile o fuori intervallo lancia un errore invece di essere salvata così com'è.
+ */
 export function toDateOnlyString(value: unknown): string | null {
   if (value === null || value === undefined || value === '') return null;
   if (value instanceof Date) {
-    if (isNaN(value.getTime())) return null;
-    const y = value.getFullYear();
-    const m = String(value.getMonth() + 1).padStart(2, '0');
-    const d = String(value.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    if (isNaN(value.getTime())) throw new Error('Data non valida');
+    const result = validDateOnly(value.getFullYear(), value.getMonth() + 1, value.getDate());
+    if (!result) throw new Error('Data non valida');
+    return result;
   }
   const str = String(value).trim();
-  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T ])/);
+  if (match) {
+    const result = validDateOnly(Number(match[1]), Number(match[2]), Number(match[3]));
+    if (!result) throw new Error('Data non valida');
+    return result;
+  }
+  // altri formati riconosciuti da Date (come prima); gli anni fuori intervallo (es. "-002023-01-01") vengono rifiutati
   const parsed = new Date(str);
   if (!isNaN(parsed.getTime())) return toDateOnlyString(parsed);
-  throw new Error(`Data non valida: ${str}`);
+  throw new Error('Data non valida (formato atteso AAAA-MM-GG)');
 }
 
 function buildTransformer(target: Function, column: string, kind: 'string' | 'date'): ValueTransformer {

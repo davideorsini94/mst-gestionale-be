@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { BaseService, CustomRequestContext } from '../../common/base-crud/base.service';
 import { Transaction, TransactionType } from './entities/transaction.entity';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
@@ -7,6 +7,10 @@ import { FindOptionsOrder, Between, MoreThanOrEqual, LessThanOrEqual } from 'typ
 import { CategoryService } from '../categories/category.service';
 import { CategoryType } from '../categories/entities/category.entity';
 import { ReceiptService } from './receipt.service';
+import { roundMoney } from './money';
+import { isCalendarDate } from '../../common/validators/calendar-date';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 @Injectable()
 export class TransactionService extends BaseService<Transaction, CreateTransactionDto, UpdateTransactionDto> {
@@ -25,10 +29,30 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
     return { category: true };
   }
 
+  /** Importi ai centesimi prima del salvataggio: la risposta deve riportare lo stesso valore salvato dal DB. */
+  private roundAmounts(dto: Partial<CreateTransactionDto>): void {
+    if (typeof dto.amount === 'number') dto.amount = roundMoney(dto.amount);
+    if (typeof dto.originalAmount === 'number') dto.originalAmount = roundMoney(dto.originalAmount);
+  }
+
+  /**
+   * I blind index (subjectHash) non vanno restituiti: il salvataggio dopo la ricevuta li rimette nell'entità
+   * (li ricalcola il subscriber), quindi si tolgono dalla risposta finale.
+   */
+  private withoutHashes(transaction: Transaction): Transaction {
+    if (!transaction) return transaction;
+    this.stripSecrets(transaction);
+    for (const key of Object.keys(transaction)) {
+      if (key.endsWith('Hash')) delete (transaction as any)[key];
+    }
+    return transaction;
+  }
+
   /**
    * Override create per gestire la creazione automatica della categoria
    */
   async createTransaction(dto: CreateTransactionDto): Promise<Transaction> {
+    this.roundAmounts(dto);
     // Se c'è categoryName ma non categoryUuid, trova o crea la categoria
     if (dto.categoryName && !dto.categoryUuid) {
       // Crea sempre categorie come BOTH così appaiono sia per entrate che uscite
@@ -54,7 +78,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
       }
     }
 
-    return transaction;
+    return this.withoutHashes(transaction);
   }
 
   /**
@@ -66,6 +90,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
   }
 
   private async doUpdateTransaction(uuid: string, dto: UpdateTransactionDto): Promise<Transaction> {
+    this.roundAmounts(dto);
     // la ricevuta emessa com'è ora (importo, data, soggetto): se viene annullata l'archivio deve riportare questi dati
     const before = await this.findByUuid(uuid);
     // Se c'è categoryName ma non categoryUuid, trova o crea la categoria
@@ -106,7 +131,7 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
       transaction = await this.repo.save(transaction);
     }
 
-    return transaction;
+    return this.withoutHashes(transaction);
   }
 
   async deleteTransaction(uuid: string): Promise<void> {
@@ -142,15 +167,31 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
     byCategory: { categoryUuid: string | null; categoryName: string; total: number; type: string }[];
     byMonth: { month: string; income: number; expense: number }[];
   }> {
+    // Parametri controllati qui: valori non validi arrivavano al DB come errore 500
+    for (const [label, value] of [
+      ['iniziale', startDate],
+      ['finale', endDate],
+    ] as const) {
+      if (value && !isCalendarDate(value)) {
+        throw new BadRequestException(`Data ${label} non valida (usa AAAA-MM-GG)`);
+      }
+    }
+    if (startDate && endDate && startDate.slice(0, 10) > endDate.slice(0, 10)) {
+      throw new BadRequestException('La data iniziale è successiva alla data finale');
+    }
+    if (categoryUuid && !UUID_RE.test(categoryUuid)) {
+      throw new BadRequestException('Categoria non valida');
+    }
+
     // Aggregazioni in SQL: nessun bisogno di caricare (e decifrare) tutti i movimenti
     const conditions: string[] = [];
     const params: any[] = [];
     if (startDate) {
-      params.push(startDate);
+      params.push(startDate.slice(0, 10));
       conditions.push(`t.date >= $${params.length}`);
     }
     if (endDate) {
-      params.push(endDate);
+      params.push(endDate.slice(0, 10));
       conditions.push(`t.date <= $${params.length}`);
     }
     if (categoryUuid) {
@@ -192,7 +233,8 @@ export class TransactionService extends BaseService<Transaction, CreateTransacti
     return {
       totalIncome,
       totalExpense,
-      balance: totalIncome - totalExpense,
+      // la differenza tra numeri decimali in virgola mobile lasciava code come 0.30000000000000004
+      balance: roundMoney(totalIncome - totalExpense),
       byCategory: byCategory.map((r: any) => ({
         categoryUuid: r.categoryUuid,
         categoryName: r.categoryName,

@@ -7,6 +7,9 @@ import {
   Param,
   Res,
   Req,
+  BadRequestException,
+  Query,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { FastifyReply, FastifyRequest } from 'fastify';
@@ -15,6 +18,9 @@ import { BackupService } from './backup.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
 import * as fs from 'fs';
+import { randomBytes } from 'crypto';
+import { Public } from '../../common/auth/decorators/public.decorator';
+import { DiskUploadedFile, releaseUploadedFile } from '../../common/files/disk-upload';
 
 @ApiTags('Settings')
 @ApiBearerAuth()
@@ -24,6 +30,8 @@ export class SettingsController {
     private readonly settingsService: SettingsService,
     private readonly backupService: BackupService,
   ) {}
+
+  private readonly downloadTickets = new Map<string, { filename: string; expiresAt: number }>();
 
   @Get()
   @ApiOperation({ summary: 'Lista impostazioni (la password SMTP non viene mai restituita)' })
@@ -43,7 +51,12 @@ export class SettingsController {
   @ApiOperation({ summary: 'Crea/Aggiorna impostazione (smtpConfig: password vuota = invariata)' })
   @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
   async upsert(@Body() body: { key: string; value: any; description?: string }) {
-    return this.settingsService.upsert(body.key, body.value, body.description);
+    // senza chiave il servizio falliva su key.startsWith (errore 500)
+    const key = typeof body?.key === 'string' ? body.key.trim() : '';
+    if (!key) {
+      throw new BadRequestException('Chiave dell\'impostazione mancante');
+    }
+    return this.settingsService.upsert(key, body.value, body.description);
   }
 
   @Delete(':key')
@@ -81,10 +94,36 @@ export class SettingsController {
     return this.backupService.listBackups();
   }
 
-  @Get('backup/download/:filename')
-  @ApiOperation({ summary: 'Scarica un file di backup' })
+  /**
+   * Il download apre una nuova scheda (un backup può pesare GB: niente blob in memoria) e il browser non invia
+   * l'header Authorization: invece del JWT in query (finirebbe nei log di nginx, valido 8 ore) si chiede un
+   * biglietto monouso valido 60 secondi per quel solo file.
+   */
+  @Post('backup/download-ticket/:filename')
+  @ApiOperation({ summary: 'Biglietto monouso per scaricare un backup' })
   @RequireCapabilities(Capability.CAN_MANAGE_BACKUP)
-  async downloadBackup(@Param('filename') filename: string, @Res() reply: FastifyReply) {
+  async createDownloadTicket(@Param('filename') filename: string) {
+    await this.backupService.downloadBackup(filename); // nome valido e file esistente
+    const now = Date.now();
+    for (const [key, t] of this.downloadTickets) if (t.expiresAt < now) this.downloadTickets.delete(key);
+    const ticket = randomBytes(32).toString('hex');
+    this.downloadTickets.set(ticket, { filename, expiresAt: now + 60_000 });
+    return { ticket };
+  }
+
+  @Get('backup/download/:filename')
+  @Public()
+  @ApiOperation({ summary: 'Scarica un file di backup (con il biglietto di download-ticket)' })
+  async downloadBackup(
+    @Param('filename') filename: string,
+    @Query('ticket') ticket: string,
+    @Res() reply: FastifyReply,
+  ) {
+    const entry = typeof ticket === 'string' ? this.downloadTickets.get(ticket) : undefined;
+    if (entry) this.downloadTickets.delete(ticket);
+    if (!entry || entry.expiresAt < Date.now() || entry.filename !== filename) {
+      throw new UnauthorizedException('Link di download scaduto: riprova dalla pagina Impostazioni');
+    }
     const { path, size } = await this.backupService.downloadBackup(filename);
     const stream = fs.createReadStream(path);
     
@@ -108,26 +147,12 @@ export class SettingsController {
   @ApiConsumes('multipart/form-data')
   @RequireCapabilities(Capability.CAN_MANAGE_BACKUP)
   async restoreDatabase(@Req() request: FastifyRequest) {
-    const body = request.body as any;
-    const file = body.file;
-    
-    if (!file) {
-      throw new Error('Nessun file caricato');
-    }
-    
-    const tempPath = `/tmp/restore-db-${Date.now()}.sql`;
-    const buffer = await file.toBuffer();
-    fs.writeFileSync(tempPath, buffer);
-    
+    const tempPath = this.uploadedBackupPath(request);
     try {
       const { safetyBackup } = await this.backupService.restoreDatabaseBackup(tempPath);
-      fs.unlinkSync(tempPath);
       return { message: 'Database ripristinato con successo', safetyBackup };
-    } catch (error) {
-      if (fs.existsSync(tempPath)) {
-        fs.unlinkSync(tempPath);
-      }
-      throw error;
+    } finally {
+      await releaseUploadedFile(request, tempPath);
     }
   }
 
@@ -136,26 +161,21 @@ export class SettingsController {
   @ApiConsumes('multipart/form-data')
   @RequireCapabilities(Capability.CAN_MANAGE_BACKUP)
   async restoreMinio(@Req() request: FastifyRequest) {
-    const body = request.body as any;
-    const file = body.file;
-    
-    if (!file) {
-      throw new Error('Nessun file caricato');
-    }
-    
-    const tempPath = `/tmp/restore-minio-${Date.now()}.tar`;
-    const buffer = await file.toBuffer();
-    fs.writeFileSync(tempPath, buffer);
-    
+    const tempPath = this.uploadedBackupPath(request);
     try {
-      await this.backupService.restoreMinioBackup(tempPath);
-      fs.unlinkSync(tempPath);
-      return { message: 'MinIO ripristinato con successo' };
-    } catch (error) {
-      if (fs.existsSync(tempPath)) {
-        fs.unlinkSync(tempPath);
-      }
-      throw error;
+      const { restored } = await this.backupService.restoreMinioBackup(tempPath);
+      return { message: `File ripristinati con successo (${restored})` };
+    } finally {
+      await releaseUploadedFile(request, tempPath);
     }
+  }
+
+  /** Il backup caricato è già su disco (scritto in streaming, vedi common/files/disk-upload): mai in memoria. */
+  private uploadedBackupPath(request: FastifyRequest): string {
+    const file = (request.body as { file?: DiskUploadedFile } | undefined)?.file;
+    if (!file?.tempFilePath) {
+      throw new BadRequestException('Nessun file caricato');
+    }
+    return file.tempFilePath;
   }
 }

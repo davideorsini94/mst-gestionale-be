@@ -4,6 +4,8 @@ import {
   Post,
   Param,
   Query,
+  BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { ReminderService } from './reminder.service';
@@ -55,7 +57,9 @@ export class ReminderController {
   @ApiOperation({ summary: 'Dettaglio reminder' })
   @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
   async findOne(@Param('uuid') uuid: string) {
-    return this.reminderService.findByUuid(uuid);
+    const reminder = await this.reminderService.findByUuid(uuid);
+    if (!reminder) throw new NotFoundException('Promemoria non trovato');
+    return reminder;
   }
 
   @Post(':uuid/resend')
@@ -69,6 +73,12 @@ export class ReminderController {
   @ApiOperation({ summary: 'Esegui controllo reminder manualmente' })
   @RequireCapabilities(Capability.CAN_MANAGE_SETTINGS)
   async checkNow() {
+    // con i promemoria disattivati il controllo non fa nulla: rispondere "completato" faceva credere il contrario
+    if (!this.reminderService.isEnabled()) {
+      throw new BadRequestException(
+        'I promemoria automatici sono disattivati (REMINDER_ENABLED non è "true"): nessun controllo eseguito',
+      );
+    }
     await this.reminderService.checkAndScheduleReminders();
     return { message: 'Controllo reminder completato' };
   }

@@ -14,6 +14,12 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/** Oggetto inesistente (HEAD → NotFound, GET → NoSuchKey). NoSuchBucket NON conta: è un errore di configurazione. */
+export function isNotFoundError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  return code === 'NotFound' || code === 'NoSuchKey';
+}
+
 @Injectable()
 export class MinioService {
   private readonly bucketName = process.env.MINIO_BUCKET || 'mst-gestionale';
@@ -84,40 +90,59 @@ export class MinioService {
   }
 
   /**
+   * Nome di un oggetto da usare così com'è (ripristino di un backup, migrazione): non lo si "pulisce", altrimenti i
+   * riferimenti nel DB non corrisponderebbero più; si rifiutano solo i nomi pericolosi.
+   */
+  assertSafeObjectName(objectName: string): string {
+    const invalid =
+      !objectName ||
+      objectName.length > 1024 ||
+      /[\x00-\x1f\x7f\\]/.test(objectName) ||
+      objectName.startsWith('/') ||
+      objectName.split('/').some((segment) => segment === '' || segment === '.' || segment === '..');
+    if (invalid) {
+      throw new Error('Nome di oggetto non valido');
+    }
+    return objectName;
+  }
+
+  /**
    * Carica un file cifrandolo (AES-256-GCM). Un buffer già cifrato (es. restore di un backup) non viene ricifrato.
+   * `keepName`: il nome non viene modificato (vedi assertSafeObjectName).
    */
   async uploadFile(
     objectName: string,
     buffer: Buffer,
     contentType?: string,
+    options: { keepName?: boolean } = {},
   ): Promise<string> {
     if (buffer.length > MAX_FILE_SIZE_BYTES) {
       throw new PayloadTooLargeException(`File troppo grande (max ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB)`);
     }
-    return this.uploadRaw(objectName, encryptFile(buffer), contentType);
+    return this.uploadRaw(objectName, encryptFile(buffer), contentType, options);
   }
 
   /** Carica i byte così come sono (già cifrati). */
-  async uploadRaw(objectName: string, buffer: Buffer, contentType?: string): Promise<string> {
+  async uploadRaw(
+    objectName: string,
+    buffer: Buffer,
+    contentType?: string,
+    options: { keepName?: boolean } = {},
+  ): Promise<string> {
     await this.ensureBucket();
 
-    const sanitizedObjectName = this.sanitizePath(objectName);
+    const finalName = options.keepName ? this.assertSafeObjectName(objectName) : this.sanitizePath(objectName);
     const metaData = contentType ? { 'Content-Type': contentType } : {};
 
     try {
-      await this.minioClient.client.putObject(
-        this.bucketName,
-        sanitizedObjectName,
-        buffer,
-        buffer.length,
-        metaData,
-      );
+      await this.minioClient.client.putObject(this.bucketName, finalName, buffer, buffer.length, metaData);
     } catch (error) {
-      console.error(`[MinIO] Error uploading file ${sanitizedObjectName}:`, error);
+      // niente nome dell'oggetto nel log: i file vecchi possono avere nomi con dati personali
+      console.error(`[MinIO] Caricamento di un file (${buffer.length} byte) non riuscito: ${error?.message ?? error}`);
       throw error;
     }
 
-    return sanitizedObjectName;
+    return finalName;
   }
 
   /** Restituisce il contenuto decifrato del file (i file legacy non cifrati vengono restituiti invariati). */
@@ -170,12 +195,17 @@ export class MinioService {
     return newPath;
   }
 
+  /**
+   * true/false solo se MinIO risponde: "mancante" vale soltanto per NotFound/NoSuchKey. Errori di rete, permessi o
+   * timeout vengono rilanciati (una migrazione non deve scambiare MinIO irraggiungibile per file mancanti).
+   */
   async fileExists(objectName: string): Promise<boolean> {
     try {
       await this.minioClient.client.statObject(this.bucketName, objectName);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (isNotFoundError(error)) return false;
+      throw error;
     }
   }
 }

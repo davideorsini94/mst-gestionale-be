@@ -1,7 +1,13 @@
-import { IsString, IsOptional, IsEnum, IsNumber, IsDateString, IsBoolean, Matches, Max, Min } from 'class-validator';
+import { IsString, IsOptional, IsEnum, IsNumber, IsBoolean, Max, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+import { roundMoney } from '../money';
+import { IsCalendarDate } from '../../../common/validators/calendar-date';
 import { BaseSaveDto } from '../../../common/base-crud/base-save.dto';
 import { TransactionType, PaymentMethod } from '../entities/transaction.entity';
+
+/** Validazione sull'importo già arrotondato ai centesimi (lo stesso che verrà salvato): 0,005 vale 0,01. */
+const RoundedMoney = () => Transform(({ value }) => (typeof value === 'number' ? roundMoney(value) : value));
 
 export class CreateTransactionDto extends BaseSaveDto {
   @ApiProperty({ enum: TransactionType })
@@ -9,6 +15,7 @@ export class CreateTransactionDto extends BaseSaveDto {
   type: TransactionType;
 
   @ApiProperty()
+  @RoundedMoney()
   @IsNumber({}, { message: "L'importo deve essere un numero" })
   @Min(0.01, { message: "L'importo deve essere di almeno 0,01 €" })
   @Max(99999999.99, { message: 'Importo troppo grande' })
@@ -16,14 +23,14 @@ export class CreateTransactionDto extends BaseSaveDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
+  @RoundedMoney()
   @IsNumber({}, { message: "L'importo originale deve essere un numero" })
   @Min(0, { message: "L'importo originale non può essere negativo" })
   @Max(99999999.99, { message: 'Importo originale troppo grande' })
   originalAmount?: number;
 
   @ApiProperty({ description: 'AAAA-MM-GG' })
-  @IsDateString()
-  @Matches(/^\d{4}-\d{2}-\d{2}/, { message: 'La data deve essere nel formato AAAA-MM-GG' })
+  @IsCalendarDate({ message: 'Data non valida: usa il formato AAAA-MM-GG con una data esistente' })
   date: string;
 
   @ApiProperty({ required: false })
