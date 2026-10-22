@@ -120,9 +120,9 @@ export class SettingsController {
     fs.writeFileSync(tempPath, buffer);
     
     try {
-      await this.backupService.restoreDatabaseBackup(tempPath);
+      const { safetyBackup } = await this.backupService.restoreDatabaseBackup(tempPath);
       fs.unlinkSync(tempPath);
-      return { message: 'Database ripristinato con successo' };
+      return { message: 'Database ripristinato con successo', safetyBackup };
     } catch (error) {
       if (fs.existsSync(tempPath)) {
         fs.unlinkSync(tempPath);

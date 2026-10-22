@@ -48,7 +48,7 @@ export class EmailService {
       });
     }
 
-    this.logger.warn('[EmailService] SMTP not configured - emails will be logged only');
+    this.logger.warn('[EmailService] SMTP non configurato: le email non vengono inviate');
     return null;
   }
 
@@ -68,6 +68,15 @@ export class EmailService {
       pass: pick('pass') as string,
       from: pick('from') as string,
     };
+    // La password salvata (mai mostrata) parte solo verso il server e l'utente salvati: altrimenti basterebbe indicare
+    // un proprio server SMTP per riceverla
+    const usesSavedPassword = !override?.pass;
+    const sameAccount =
+      (config.host || '').trim().toLowerCase() === (saved.host || '').trim().toLowerCase() &&
+      (config.user || '').trim().toLowerCase() === (saved.user || '').trim().toLowerCase();
+    if (usesSavedPassword && saved.pass && !sameAccount) {
+      throw new Error('Server o utente diversi da quelli salvati: inserisci la password per questa prova');
+    }
     if (!config.host) {
       throw new Error('SMTP non configurato: indica almeno il server');
     }
@@ -138,14 +147,42 @@ export class EmailService {
       await transporter.sendMail(mailOptions);
       this.logger.info(`[EmailService] Email sent to ${recipientEmail}${ccEmail ? ` (CC: ${ccEmail})` : ''}`, { subject });
     } else {
-      // Log email invece di inviarla (per sviluppo/test)
-      this.logger.info(`[EmailService] Email would be sent (SMTP not configured)`, {
-        to: recipientEmail,
-        cc: ccEmail,
-        subject,
-        body: html,
-      });
+      // Senza SMTP l'email non parte: il reminder deve risultare FALLITO (non inviato) per poter essere reinviato
+      throw new Error('SMTP non configurato: email non inviata (Impostazioni → Email)');
     }
+  }
+
+  /** Email con il link per reimpostare la password (senza SMTP configurato: errore, nessun invio). */
+  async sendPasswordResetEmail(to: string, name: string, username: string, link: string, minutes: number): Promise<void> {
+    const transporter = await this.createTransporter();
+    const config = await this.getSmtpConfig();
+    if (!transporter || !config) {
+      throw new Error('SMTP non configurato');
+    }
+    const esc = (v: string) =>
+      String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    const html = `<!DOCTYPE html>
+<html><body style="font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; color: #0F1E3A; line-height: 1.5;">
+  <div style="max-width: 520px; margin: 0 auto; padding: 24px;">
+    <h2 style="color: #1F3A72; margin: 0 0 16px;">Reimposta la password</h2>
+    <p>Ciao ${esc(name)},</p>
+    <p>abbiamo ricevuto una richiesta di recupero della password per l'utente <strong>${esc(username)}</strong> di MST Gestionale.</p>
+    <p style="margin: 24px 0;">
+      <a href="${esc(link)}" style="background: #1F3A72; color: #fff; padding: 12px 20px; border-radius: 10px; text-decoration: none; display: inline-block;">Scegli una nuova password</a>
+    </p>
+    <p>Il link vale ${minutes} minuti e si può usare una sola volta. Se non hai chiesto tu il recupero, ignora questa email: la password attuale resta valida.</p>
+    <p style="color: #5F6C84; font-size: 13px;">Se il pulsante non funziona, copia questo indirizzo nel browser:<br>${esc(link)}</p>
+  </div>
+</body></html>`;
+    await transporter.sendMail({
+      from: config.from || config.user,
+      to,
+      subject: '[MST Gestionale] Reimposta la password',
+      html,
+      text:
+        `Ciao ${name},\n\nper scegliere una nuova password per l'utente ${username} apri questo link (vale ${minutes} minuti, ` +
+        `un solo uso):\n${link}\n\nSe non hai chiesto tu il recupero, ignora questa email.`,
+    });
   }
 
   private generateEmailHtml(

@@ -20,6 +20,7 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import { FileService } from '../../common/files/file.service';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
+import { StripProtectedFieldsPipe, PROFILE_IMAGE_FIELDS } from '../../common/pipes/strip-protected-fields.pipe';
 
 @ApiTags('Members (Tesserati)')
 @ApiBearerAuth()
@@ -72,14 +73,14 @@ export class MemberController {
   @Post()
   @ApiOperation({ summary: 'Crea tesserato' })
   @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
-  async create(@Body() createMemberDto: CreateMemberDto) {
+  async create(@Body(new StripProtectedFieldsPipe(PROFILE_IMAGE_FIELDS)) createMemberDto: CreateMemberDto) {
     return this.memberService.create(createMemberDto);
   }
 
   @Put(':uuid')
   @ApiOperation({ summary: 'Aggiorna tesserato' })
   @RequireCapabilities(Capability.CAN_MANAGE_MEMBERS)
-  async update(@Param('uuid') uuid: string, @Body() updateMemberDto: UpdateMemberDto) {
+  async update(@Param('uuid') uuid: string, @Body(new StripProtectedFieldsPipe(PROFILE_IMAGE_FIELDS)) updateMemberDto: UpdateMemberDto) {
     return this.memberService.update(uuid, updateMemberDto);
   }
 

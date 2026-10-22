@@ -13,6 +13,7 @@ import { VehicleService } from './vehicle.service';
 import { Vehicle } from './entities/vehicle.entity';
 import { RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
 import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
+import { StripProtectedFieldsPipe } from '../../common/pipes/strip-protected-fields.pipe';
 
 @ApiTags('Vehicles')
 @ApiBearerAuth()
@@ -45,14 +46,14 @@ export class VehicleController {
   @Post()
   @ApiOperation({ summary: 'Crea veicolo' })
   @RequireCapabilities(Capability.CAN_MANAGE_VEHICLES)
-  async create(@Body() vehicle: Partial<Vehicle>) {
+  async create(@Body(new StripProtectedFieldsPipe()) vehicle: Partial<Vehicle>) {
     return this.vehicleService.create(vehicle as any);
   }
 
   @Put(':uuid')
   @ApiOperation({ summary: 'Aggiorna veicolo' })
   @RequireCapabilities(Capability.CAN_MANAGE_VEHICLES)
-  async update(@Param('uuid') uuid: string, @Body() vehicle: Partial<Vehicle>) {
+  async update(@Param('uuid') uuid: string, @Body(new StripProtectedFieldsPipe()) vehicle: Partial<Vehicle>) {
     return this.vehicleService.update(uuid, vehicle as any);
   }
 

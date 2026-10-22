@@ -22,6 +22,7 @@ import { Capability } from '../../common/models/capabilities-per-role/capability
 import { ReceiptMigrationService } from './receipt-migration.service';
 import { ExcelImportService } from './excel-import.service';
 import { ReceiptService } from './receipt.service';
+import { StripProtectedFieldsPipe, TRANSACTION_SERVER_FIELDS } from '../../common/pipes/strip-protected-fields.pipe';
 
 @ApiTags('Transactions')
 @ApiBearerAuth()
@@ -55,6 +56,30 @@ export class TransactionController {
     return this.transactionService.getStatistics(startDate, endDate, categoryUuid);
   }
 
+  @Get('receipts/annulled')
+  @ApiOperation({ summary: 'Ricevute annullate (numeri non riassegnati: movimenti eliminati, diventati uscite o spostati di anno)' })
+  @ApiQuery({ name: 'year', required: false })
+  @RequireCapabilities(Capability.CAN_VIEW_TRANSACTIONS)
+  async annulledReceipts(@Query('year') year?: string) {
+    const y = year ? parseInt(year, 10) : undefined;
+    return this.receiptService.listAnnulled(Number.isFinite(y) ? y : undefined);
+  }
+
+  @Get('receipts/annulled/:uuid/pdf')
+  @ApiOperation({ summary: 'PDF di una ricevuta annullata o di un duplicato archiviato' })
+  @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
+  async annulledReceiptPdf(@Param('uuid') uuid: string, @Res() reply: FastifyReply) {
+    const found = await this.receiptService.annulledPdfPath(uuid);
+    if (!found) throw new NotFoundException('PDF non disponibile');
+    const stream = await this.receiptService.getReceiptStream(found.path);
+    reply.header('Content-Type', 'application/pdf');
+    reply.header(
+      'Content-Disposition',
+      `inline; filename="ricevuta_annullata_${found.receiptNumber}_${found.receiptYear}.pdf"`,
+    );
+    return reply.send(stream);
+  }
+
   @Get(':uuid')
   @ApiOperation({ summary: 'Dettaglio transazione' })
   @RequireCapabilities(Capability.CAN_VIEW_TRANSACTIONS)
@@ -65,14 +90,14 @@ export class TransactionController {
   @Post()
   @ApiOperation({ summary: 'Crea transazione' })
   @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
-  async create(@Body() createTransactionDto: CreateTransactionDto) {
+  async create(@Body(new StripProtectedFieldsPipe(TRANSACTION_SERVER_FIELDS)) createTransactionDto: CreateTransactionDto) {
     return this.transactionService.createTransaction(createTransactionDto);
   }
 
   @Put(':uuid')
   @ApiOperation({ summary: 'Aggiorna transazione' })
   @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
-  async update(@Param('uuid') uuid: string, @Body() updateTransactionDto: UpdateTransactionDto) {
+  async update(@Param('uuid') uuid: string, @Body(new StripProtectedFieldsPipe(TRANSACTION_SERVER_FIELDS)) updateTransactionDto: UpdateTransactionDto) {
     return this.transactionService.updateTransaction(uuid, updateTransactionDto);
   }
 
@@ -143,7 +168,7 @@ export class TransactionController {
   }
 
   @Post('regenerate-receipts/:year')
-  @ApiOperation({ summary: 'Rigenera tutte le ricevute per un anno con numeri sequenziali corretti' })
+  @ApiOperation({ summary: "Rigenera i PDF delle ricevute di un anno (i numeri emessi non cambiano)" })
   @RequireCapabilities(Capability.CAN_MANAGE_TRANSACTIONS)
   async regenerateReceipts(@Param('year') year: string) {
     const yearNum = parseInt(year, 10);

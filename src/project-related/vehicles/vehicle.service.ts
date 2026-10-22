@@ -14,6 +14,11 @@ export class VehicleService extends BaseService<Vehicle, BaseSaveDto, BaseSaveDt
     super(Vehicle);
   }
 
+  async delete(uuid: string): Promise<Vehicle> {
+    await this.reminderService.cancelRemindersForEntity(uuid);
+    return super.delete(uuid);
+  }
+
   protected getDefaultOrder(): FindOptionsOrder<Vehicle> {
     return { name: 'ASC' };
   }

@@ -11,6 +11,18 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { CategoryService } from './category.service';
 import { Category, CategoryType } from './entities/category.entity';
+import { RequireAnyCapability, RequireCapabilities } from '../../common/auth/decorators/capabilities.decorator';
+import { Capability } from '../../common/models/capabilities-per-role/capability.enum';
+import { StripProtectedFieldsPipe } from '../../common/pipes/strip-protected-fields.pipe';
+
+/** Le categorie si leggono da Movimenti e Statistiche (select) oltre che dalla loro gestione. */
+const READ_CATEGORIES = [
+  Capability.CAN_VIEW_CATEGORIES,
+  Capability.CAN_MANAGE_CATEGORIES,
+  Capability.CAN_VIEW_TRANSACTIONS,
+  Capability.CAN_MANAGE_TRANSACTIONS,
+  Capability.CAN_VIEW_STATISTICS,
+];
 
 @ApiTags('Categories')
 @ApiBearerAuth()
@@ -19,12 +31,14 @@ export class CategoryController {
   constructor(private readonly categoryService: CategoryService) {}
 
   @Get()
+  @RequireAnyCapability(...READ_CATEGORIES)
   @ApiOperation({ summary: 'Lista categorie' })
   async findAll(@Query('filters') filters?: string) {
     return this.categoryService.findAndCountWithFilterList(filters, null);
   }
 
   @Get('search')
+  @RequireAnyCapability(...READ_CATEGORIES)
   @ApiOperation({ summary: 'Ricerca categorie per autocomplete' })
   @ApiQuery({ name: 'q', required: false, description: 'Testo di ricerca' })
   @ApiQuery({ name: 'type', required: false, enum: CategoryType, description: 'Tipo categoria' })
@@ -52,24 +66,28 @@ export class CategoryController {
   }
 
   @Get(':uuid')
+  @RequireAnyCapability(...READ_CATEGORIES)
   @ApiOperation({ summary: 'Dettaglio categoria' })
   async findOne(@Param('uuid') uuid: string) {
     return this.categoryService.findByUuid(uuid);
   }
 
   @Post()
+  @RequireCapabilities(Capability.CAN_MANAGE_CATEGORIES)
   @ApiOperation({ summary: 'Crea categoria' })
-  async create(@Body() category: Partial<Category>) {
+  async create(@Body(new StripProtectedFieldsPipe()) category: Partial<Category>) {
     return this.categoryService.create(category as any);
   }
 
   @Put(':uuid')
+  @RequireCapabilities(Capability.CAN_MANAGE_CATEGORIES)
   @ApiOperation({ summary: 'Aggiorna categoria' })
-  async update(@Param('uuid') uuid: string, @Body() category: Partial<Category>) {
+  async update(@Param('uuid') uuid: string, @Body(new StripProtectedFieldsPipe()) category: Partial<Category>) {
     return this.categoryService.update(uuid, category as any);
   }
 
   @Delete(':uuid')
+  @RequireCapabilities(Capability.CAN_MANAGE_CATEGORIES)
   @ApiOperation({ summary: 'Elimina categoria' })
   async remove(@Param('uuid') uuid: string) {
     return this.categoryService.delete(uuid);

@@ -72,6 +72,12 @@ export class SettingsService {
     if (next.pass) {
       next.pass = isEncryptedValue(next.pass) ? previous?.pass : encryptString(String(next.pass), SMTP_PASS_AAD);
     } else {
+      // La password salvata resta valida solo per lo stesso server e utente: altrimenti basterebbe salvare un proprio
+      // server SMTP (senza conoscere la password) per riceverla al primo invio
+      const same = (a: unknown, b: unknown) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+      if (previous?.pass && (!same(next.host, previous.host) || !same(next.user, previous.user))) {
+        throw new BadRequestException('Server o utente SMTP cambiati: inserisci di nuovo la password');
+      }
       next.pass = previous?.pass ?? '';
     }
     return next;

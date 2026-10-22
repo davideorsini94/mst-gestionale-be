@@ -91,6 +91,17 @@ export class StorageEncryptionMigration {
       throw new Error(`Migrazione dei file non completata: ${report.errors.length} errori (vedi log)`);
     }
 
+    // Molti file mancanti = bucket sbagliato/vuoto o MinIO non montato: non si segna la migrazione come fatta (i file
+    // non verrebbero più cifrati né rinominati). Soglia: più di 10 file e più del 2% dei referenziati.
+    const tooManyMissing =
+      report.missing.length > 10 && report.missing.length > report.referenced * 0.02;
+    if (tooManyMissing && process.env.ALLOW_MISSING_FILES !== 'true') {
+      throw new Error(
+        `Migrazione dei file non completata: ${report.missing.length} file su ${report.referenced} non trovati nel ` +
+          `bucket "${process.env.MINIO_BUCKET}". Controlla MINIO_BUCKET e MinIO (ALLOW_MISSING_FILES=true per forzare)`,
+      );
+    }
+
     await dataSource.query(
       `INSERT INTO settings (key, value, description) VALUES ($1, $2::jsonb, $3)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { TransactionService } from './transaction.service';
 import { AmountReviewStatus, Transaction, TransactionType, PaymentMethod } from './entities/transaction.entity';
 import { CategoryService } from '../categories/category.service';
@@ -70,7 +70,22 @@ export class ExcelImportService {
     private readonly categoryService: CategoryService,
   ) { }
 
-  async importFromFile(buffer: Buffer, _filename?: string): Promise<ImportResult> {
+  /** Un import alla volta: due import dello stesso file in parallelo non si vedevano a vicenda e duplicavano le righe. */
+  private importRunning = false;
+
+  async importFromFile(buffer: Buffer, filename?: string): Promise<ImportResult> {
+    if (this.importRunning) {
+      throw new ConflictException('È già in corso un altro import: attendi che finisca e riprova');
+    }
+    this.importRunning = true;
+    try {
+      return await this.runImport(buffer, filename);
+    } finally {
+      this.importRunning = false;
+    }
+  }
+
+  private async runImport(buffer: Buffer, _filename?: string): Promise<ImportResult> {
     const { rows: allRows, date1904 } = readFirstSheet(buffer);
     const result: ImportResult = { imported: 0, updated: 0, corrected: 0, errors: [] };
 
@@ -243,6 +258,11 @@ export class ExcelImportService {
     // Importo e Tipo - gestisce sia colonna singola che colonne separate entrate/uscite (0 = vuoto)
     let amountCell: SheetCell | undefined;
     let importoValue: number | null = null;
+    const hasIncome = !this.isZeroOrEmpty(row.entrate, hints.entrate);
+    const hasExpense = !this.isZeroOrEmpty(row.uscite, hints.uscite);
+    if (hasIncome && hasExpense) {
+      throw new Error('Importo sia in Entrate sia in Uscite: dividi la riga in due');
+    }
     if (!this.isZeroOrEmpty(row.entrate, hints.entrate)) {
       amountCell = row.entrate;
       importoValue = parseAmountCell(row.entrate.v, hints.entrate);
@@ -258,6 +278,13 @@ export class ExcelImportService {
 
     if (importoValue === null) {
       throw new Error('Importo mancante');
+    }
+    if (importoValue === 0) {
+      throw new Error('Importo zero');
+    }
+    if (importoValue < 0 && (hasIncome || hasExpense)) {
+      // un negativo in Entrate/Uscite è uno storno: il segno andrebbe perso, meglio correggere il file
+      throw new Error(`Importo negativo nella colonna ${hasIncome ? 'Entrate' : 'Uscite'}: usa l'altra colonna o correggi il file`);
     }
     transaction.amount = Math.abs(importoValue);
 

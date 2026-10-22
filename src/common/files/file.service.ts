@@ -67,8 +67,39 @@ export class FileService {
     };
   }
 
+  /** A chi appartiene il file (foto o documento di un tesserato/staff); null se non è collegato a nessuno. */
+  async findOwner(uuid: string): Promise<{ type: 'member' | 'staff'; ownerUuid: string } | null> {
+    if (!/^[0-9a-f-]{36}$/i.test(uuid)) return null;
+    const [row] = await this.fileRepository.query(
+      `SELECT 'member' AS type, uuid::text AS owner FROM members WHERE "profileImageUuid"::text = $1
+       UNION ALL SELECT 'member', "memberUuid"::text FROM member_documents WHERE "fileUuid"::text = $1
+       UNION ALL SELECT 'staff', uuid::text FROM staff WHERE "profileImageUuid"::text = $1
+       UNION ALL SELECT 'staff', "staffUuid"::text FROM staff_documents WHERE "fileUuid"::text = $1
+       LIMIT 1`,
+      [uuid],
+    );
+    return row ? { type: row.type, ownerUuid: row.owner } : null;
+  }
+
   async findByUuid(uuid: string): Promise<File | null> {
     return this.fileRepository.findOne({ where: { uuid } });
+  }
+
+  /**
+   * Elimina file (MinIO + record) dopo la cancellazione del proprietario: un errore su un file viene registrato e non
+   * blocca gli altri (il proprietario è già stato cancellato).
+   */
+  async deleteFilesQuietly(fileUuids: string[]): Promise<void> {
+    for (const uuid of fileUuids) {
+      try {
+        const file = await this.findByUuid(uuid);
+        if (!file) continue;
+        if (file.minioPath) await this.minioService.deleteFile(file.minioPath);
+        await this.fileRepository.remove(file);
+      } catch (error) {
+        console.error(`[FileService] File ${uuid} non eliminato: ${error.message}`);
+      }
+    }
   }
 
   /**

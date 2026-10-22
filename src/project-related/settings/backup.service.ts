@@ -136,45 +136,94 @@ export class BackupService {
     }
   }
 
-  async restoreDatabaseBackup(backupPath: string): Promise<void> {
+  /**
+   * Chiave di controllo cifratura contenuta nel backup (tabella settings), letta senza toccare il DB.
+   * undefined = backup senza cifratura (v1.3): verrà cifrato dalle migrazioni dopo il ripristino.
+   */
+  private async readBackupKeyCheck(pgRestore: string, backupPath: string): Promise<string | undefined> {
+    const out = path.join(this.backupDir, `.settings-${Date.now()}.txt`);
+    try {
+      await this.runProcess(pgRestore, ['--data-only', '--table=settings', '--file=-'], {
+        stdinFile: backupPath,
+        stdoutFile: out,
+      });
+      const line = fs
+        .readFileSync(out, 'utf8')
+        .split('\n')
+        .find((l) => l.startsWith(`${KEY_CHECK_SETTING}\t`));
+      if (!line) return undefined;
+      // COPY: key \t value(jsonb) \t ... (escape del formato testo: \\ → \)
+      const raw = line.split('\t')[1].replace(/\\\\/g, '\\');
+      const value = JSON.parse(raw);
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    } finally {
+      fs.rmSync(out, { force: true });
+    }
+  }
+
+  private async replaceDatabaseWith(pgRestore: string, dbName: string, backupPath: string): Promise<void> {
+    // Schema pulito prima del restore: con "-c" la tabella migrations della versione attuale sopravviverebbe a un
+    // dump di una versione precedente (le migrazioni risulterebbero eseguite su dati non migrati).
+    await dataSource.query('DROP SCHEMA public CASCADE');
+    await dataSource.query('CREATE SCHEMA public');
+    await this.runProcess(pgRestore, [...this.dbConnectionArgs(), '-d', dbName, '--no-owner', '--exit-on-error'], {
+      stdinFile: backupPath,
+    });
+    // Porta il DB ripristinato alla versione attuale (cifratura compresa)
+    const executed = await dataSource.runMigrations({ transaction: 'each' });
+    this.logger.log(`Migrazioni eseguite dopo il restore: ${executed.map((m) => m.name).join(', ') || 'nessuna'}`);
+  }
+
+  /**
+   * Ripristino del database. Prima di toccare qualsiasi cosa: il file deve essere leggibile per intero e, se cifrato,
+   * con le stesse chiavi dell'app; poi si fa un backup di sicurezza del DB attuale, ricaricato in automatico se il
+   * ripristino fallisce a metà.
+   */
+  async restoreDatabaseBackup(backupPath: string): Promise<{ safetyBackup: string }> {
     const dbName = process.env.DB_DATABASE || 'mst_gestionale';
     const pgRestore = this.findPgBinary('pg_restore');
 
+    this.logger.log(`Restoring database from: ${backupPath}`);
     try {
-      this.logger.log(`Restoring database from: ${backupPath}`);
+      // lettura completa (non solo l'indice): un file troncato viene scartato qui
+      await this.runProcess(pgRestore, ['--file=/dev/null'], { stdinFile: backupPath });
+    } catch {
+      throw new BadRequestException('Il file non è un backup del database valido o è incompleto: nessuna modifica effettuata');
+    }
 
-      // Il file deve essere un archivio leggibile PRIMA di toccare il database
-      try {
-        await this.runProcess(pgRestore, ['--list'], { stdinFile: backupPath });
-      } catch {
-        throw new BadRequestException('Il file non è un backup del database valido: nessuna modifica effettuata');
-      }
+    const keyCheck = await this.readBackupKeyCheck(pgRestore, backupPath).catch((): undefined => undefined);
+    if (keyCheck !== undefined && !keyCheckMatches(keyCheck)) {
+      throw new BadRequestException(
+        'Il backup è cifrato con chiavi diverse da quelle attuali: nessuna modifica effettuata',
+      );
+    }
 
-      // Schema pulito prima del restore: con "-c" la tabella migrations della versione attuale sopravviverebbe a un
-      // dump di una versione precedente (le migrazioni risulterebbero eseguite su dati non migrati).
-      await dataSource.query('DROP SCHEMA public CASCADE');
-      await dataSource.query('CREATE SCHEMA public');
-      await this.runProcess(pgRestore, [...this.dbConnectionArgs(), '-d', dbName, '--no-owner'], {
-        stdinFile: backupPath,
-      });
+    const safety = await this.createDatabaseBackup();
+    this.logger.log(`Backup di sicurezza prima del ripristino: ${safety.filename}`);
 
-      // Porta il DB ripristinato alla versione attuale (cifratura compresa) e allinea i file
-      const executed = await dataSource.runMigrations({ transaction: 'each' });
-      this.logger.log(`Migrazioni eseguite dopo il restore: ${executed.map((m) => m.name).join(', ') || 'nessuna'}`);
-      // Un backup cifrato con altre chiavi renderebbe i dati illeggibili (e mescolati con i nuovi)
+    try {
+      await this.replaceDatabaseWith(pgRestore, dbName, backupPath);
       const check = await dataSource.query(`SELECT value FROM settings WHERE key = $1`, [KEY_CHECK_SETTING]);
       if (!check.length || !keyCheckMatches(check[0].value)) {
-        throw new Error(
-          'Il backup ripristinato è cifrato con chiavi diverse da quelle attuali: ripristina un backup compatibile',
-        );
+        throw new Error('il database ripristinato non corrisponde alle chiavi di cifratura attuali');
       }
       await this.storageMigration.run();
-
       this.logger.log('Database restore completed successfully');
+      return { safetyBackup: safety.filename };
     } catch (error) {
       this.logger.error(`Failed to restore database: ${error.message}`, error.stack);
-      if (error instanceof BadRequestException) throw error;
-      throw new InternalServerErrorException(`Ripristino del database non riuscito: ${error.message}`);
+      try {
+        await this.replaceDatabaseWith(pgRestore, dbName, safety.path);
+        this.logger.warn(`Ripristino fallito: database riportato allo stato precedente (${safety.filename})`);
+      } catch (rollbackError) {
+        this.logger.error(`Anche il ritorno allo stato precedente è fallito: ${rollbackError.message}`);
+        throw new InternalServerErrorException(
+          `Ripristino non riuscito (${error.message}) e ritorno automatico fallito: ripristina a mano il backup ${safety.filename}`,
+        );
+      }
+      throw new InternalServerErrorException(
+        `Ripristino non riuscito: ${error.message}. Il database è stato riportato allo stato precedente.`,
+      );
     }
   }
 

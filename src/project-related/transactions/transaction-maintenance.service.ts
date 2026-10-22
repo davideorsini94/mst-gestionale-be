@@ -165,7 +165,7 @@ export class TransactionMaintenanceService {
         groups: groups.length,
         toRemove: removeUuids.length,
         withReceipt,
-        incomeYearsToRenumber: years,
+        incomeYears: years,
         archived,
       },
       groups: groups.slice(start, start + pageSize).map(({ removeUuids: _r, keptUuid: _k, ...g }) => g),
@@ -173,7 +173,7 @@ export class TransactionMaintenanceService {
     };
   }
 
-  /** Sposta i duplicati nell'archivio (ripristinabili) e rinumera le ricevute degli anni coinvolti. */
+  /** Sposta i duplicati nell'archivio (ripristinabili). Le ricevute non vengono rinumerate. */
   async removeDuplicates(expectedCount: number) {
     const groups = await this.computeDuplicates();
     const toRemove = groups.flatMap((g) => g.removeUuids.map((uuid) => ({ uuid, keptUuid: g.keptUuid })));
@@ -209,42 +209,55 @@ export class TransactionMaintenanceService {
       await manager.query(`DELETE FROM transactions WHERE uuid = ANY($1::uuid[])`, [uuids]);
     });
 
-    // PDF delle ricevute dei duplicati (dopo il commit)
-    for (const row of removedRows) {
-      if (row.receiptMinioPath) await this.receiptService.deleteReceipt(row.receiptMinioPath);
-    }
-
-    // Numerazione coerente: rigenerazione delle ricevute degli anni con entrate rimosse
+    // Numeri e PDF delle ricevute dei duplicati restano nell'archivio (ripristinabili): nessuna rinumerazione, i
+    // numeri archiviati non vengono riassegnati alle nuove entrate
     const years = Array.from(new Set(removedRows.filter((r) => r.type === TransactionType.INCOME).map((r) => r.receiptYear ?? r.year))).sort();
-    let receiptsRegenerated = 0;
-    const errors: string[] = [];
-    for (const year of years) {
-      const res = await this.receiptService.regenerateReceiptsForYear(year);
-      receiptsRegenerated += res.regenerated;
-      errors.push(...res.errors);
-    }
-    this.logger.log(`Duplicati rimossi: ${uuids.length}; ricevute rigenerate: ${receiptsRegenerated} (${years.join(', ')})`);
-    return { removed: uuids.length, receiptsRegenerated, years, errors };
+    this.logger.log(`Duplicati archiviati: ${uuids.length} (anni con entrate: ${years.join(', ') || 'nessuno'})`);
+    return { removed: uuids.length, receiptsRegenerated: 0, years, errors: [] as string[] };
   }
 
   /** Ripristina tutti i movimenti archiviati dalla pulizia duplicati. */
   async restoreDuplicates() {
-    const restored: { type: string; year: number }[] = await dataSource.transaction(async (manager) => {
+    const restored: { uuid: string; type: string; year: number }[] = await dataSource.transaction(async (manager) => {
       const rows = await manager.query(
         `INSERT INTO transactions
          SELECT (jsonb_populate_record(NULL::transactions, d.data)).*
          FROM transactions_removed_duplicates d
          WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.uuid = d.uuid)
-         RETURNING type, EXTRACT(YEAR FROM date)::int AS year`,
+         RETURNING uuid::text AS uuid, type, EXTRACT(YEAR FROM date)::int AS year`,
       );
       await manager.query(`DELETE FROM transactions_removed_duplicates`);
       return rows;
     });
-    const years = Array.from(new Set(restored.filter((r) => r.type === TransactionType.INCOME).map((r) => r.year))).sort();
-    for (const year of years) {
-      await this.receiptService.regenerateReceiptsForYear(year);
+    // I movimenti tornano con i loro numeri e PDF originali. Eccezioni (dati archiviati da versioni precedenti):
+    // numero già usato da un altro movimento → nuovo numero; PDF mancante → rigenerato con lo stesso numero.
+    let renumbered = 0;
+    let regenerated = 0;
+    for (const row of restored.filter((r) => r.type === TransactionType.INCOME)) {
+      const t = await dataSource.getRepository(Transaction).findOne({ where: { uuid: row.uuid } });
+      if (!t) continue;
+      const conflict = await this.receiptService.hasNumberConflict(t);
+      if (!conflict && t.receiptNumber && (await this.receiptService.pdfExists(t.receiptMinioPath))) continue;
+      if (conflict) {
+        t.receiptNumber = null;
+        t.receiptYear = null;
+        renumbered++;
+      } else {
+        regenerated++;
+      }
+      try {
+        const receipt = await this.receiptService.updateReceipt(t);
+        await dataSource.getRepository(Transaction).update(
+          { uuid: t.uuid },
+          { receiptMinioPath: receipt.minioPath, receiptNumber: receipt.receiptNumber, receiptYear: receipt.receiptYear },
+        );
+      } catch (error) {
+        this.logger.error(`Ricevuta del movimento ripristinato ${t.uuid} non rigenerata: ${error.message}`);
+      }
     }
-    return { restored: restored.length, years };
+    const years = Array.from(new Set(restored.filter((r) => r.type === TransactionType.INCOME).map((r) => r.year))).sort();
+    this.logger.log(`Ripristinati ${restored.length} movimenti (nuovo numero: ${renumbered}, PDF rigenerati: ${regenerated})`);
+    return { restored: restored.length, years, renumbered, regenerated };
   }
 
   // ───────────────────────── Revisione importi sospetti ─────────────────────────

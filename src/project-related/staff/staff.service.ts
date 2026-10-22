@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, NotFoundException, Inject, forwardRef, BadRequestException } from '@nestjs/common';
 import { BaseService } from '../../common/base-crud/base.service';
 import { Staff, StaffDocument, StaffDocumentType } from './entities/staff.entity';
 import { CreateStaffDto } from './dto/create-staff.dto';
@@ -19,6 +19,24 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
     private readonly reminderService: ReminderService,
   ) {
     super(Staff);
+  }
+
+  /** Cancella lo staff con foto e documenti, annulla i suoi reminder e lo toglie dai veicoli assegnati. */
+  async delete(uuid: string): Promise<Staff> {
+    const staff = await this.repo.findOne({ where: { uuid }, relations: ['documents'] });
+    if (!staff) {
+      throw new NotFoundException(`Staff with uuid ${uuid} not found`);
+    }
+    const fileUuids = [staff.profileImageUuid, ...staff.documents.map((d) => d.fileUuid)].filter(Boolean);
+    // tutto o niente: veicoli e tesserati collegati hanno un vincolo verso staff (senza scollegarli: errore 500)
+    await dataSource.transaction(async (manager) => {
+      await manager.query(`UPDATE vehicles SET "assignedStaffUuid" = NULL WHERE "assignedStaffUuid" = $1`, [uuid]);
+      await manager.query(`UPDATE members SET "staffUuid" = NULL WHERE "staffUuid" = $1`, [uuid]);
+      await manager.query(`DELETE FROM staff WHERE uuid = $1`, [uuid]);
+    });
+    await this.reminderService.cancelRemindersForEntity(uuid);
+    await this.fileService.deleteFilesQuietly(fileUuids);
+    return staff;
   }
 
   protected getDefaultOrder(): FindOptionsOrder<Staff> {
@@ -87,6 +105,9 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
     }
 
     // Struttura: staff/{uuid}/documents/{tipo}
+    if (!Object.values(StaffDocumentType).includes(documentType)) {
+      throw new BadRequestException(`Tipo di documento non valido: ${documentType}`);
+    }
     const docTypeFolder = documentType.toLowerCase().replace(/_/g, '-');
     const folder = `staff/${staffUuid}/documents/${docTypeFolder}`;
     
@@ -100,7 +121,13 @@ export class StaffService extends BaseService<Staff, CreateStaffDto, UpdateStaff
       staffUuid,
     });
 
-    return this.documentRepository.save(document);
+    try {
+      return await this.documentRepository.save(document);
+    } catch (error) {
+      // il file è già su MinIO: senza il documento resterebbe orfano
+      await this.fileService.deleteFilesQuietly([fileEntity.uuid]);
+      throw error;
+    }
   }
 
   async getDocuments(staffUuid: string): Promise<StaffDocument[]> {
