@@ -164,6 +164,17 @@ export class MinioService {
     await this.minioClient.client.removeObject(this.bucketName, objectName);
   }
 
+  /** Byte occupati da tutti gli oggetti del bucket (stima dello spazio per il backup dei file). */
+  async bucketSize(): Promise<number> {
+    let total = 0;
+    const stream = this.minioClient.client.listObjects(this.bucketName, undefined, true);
+    return new Promise((resolve, reject) => {
+      stream.on('data', (obj) => (total += obj.size ?? 0));
+      stream.on('error', reject);
+      stream.on('end', () => resolve(total));
+    });
+  }
+
   async listFiles(prefix?: string): Promise<string[]> {
     const objects: string[] = [];
     const stream = this.minioClient.client.listObjects(this.bucketName, prefix, true);
