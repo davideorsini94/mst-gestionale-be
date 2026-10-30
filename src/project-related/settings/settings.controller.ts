@@ -87,6 +87,13 @@ export class SettingsController {
     return this.backupService.createFullBackup();
   }
 
+  @Get('backup/status')
+  @ApiOperation({ summary: 'Stato del backup automatico notturno' })
+  @RequireCapabilities(Capability.CAN_MANAGE_BACKUP)
+  getBackupStatus() {
+    return this.backupService.getNightlyStatus();
+  }
+
   @Get('backup/list')
   @ApiOperation({ summary: 'Lista dei backup disponibili' })
   @RequireCapabilities(Capability.CAN_MANAGE_BACKUP)

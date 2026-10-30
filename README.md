@@ -84,6 +84,9 @@ file. L'interfaccia React è nel repository [`mst-gestionale-ui`](https://github
 
 ### Backup e ripristino affidabili
 - Backup del database (`pg_dump`), dei file (tar del bucket) o completo, scaricabili dall'interfaccia.
+- **Backup completo automatico ogni notte** alle 4 (ora italiana): sulla macchina restano gli ultimi 5 notturni del
+  database e gli ultimi 5 dei file, il più vecchio si elimina solo dopo che il nuovo è completo. I backup manuali
+  (`*-backup-*`) non contano e restano finché non si eliminano; i notturni si chiamano `*-nightly-*`.
 - **Ripristino in streaming su disco** (backup da GB senza saturare la RAM), verifica che il backup sia leggibile con
   le chiavi dell'installazione, **backup di sicurezza automatico** e ritorno allo stato precedente se qualcosa fallisce.
 
@@ -192,6 +195,7 @@ npm run lint        # ESLint
 | `DATA_ENCRYPTION_KEY`, `DATA_HASH_KEY` | chiavi di cifratura e dei blind index (32 byte in base64) |
 | `MINIO_HOST`, `MINIO_PORT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | storage dei file |
 | `BACKUP_DIR`, `PG_BIN_DIR` | cartella dei backup e di `pg_dump` |
+| `BACKUP_AUTO_ENABLED` | backup notturno automatico (attivo salvo `false`, `0`, `no`, `off`) |
 | `REMINDER_ENABLED`, `REMINDER_DAYS_*` | promemoria automatici e giorni di anticipo per tipo |
 | `SWAGGER_ENABLED`, `CORS_ORIGIN` | in produzione spenti salvo valore esplicito |
 
